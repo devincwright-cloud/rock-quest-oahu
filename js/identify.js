@@ -89,13 +89,21 @@ export async function identifyRock(dataUrl, opts = {}) {
         }
       : null;
 
+  // Shrink large camera snaps so Netlify/xAI stay under time & size limits
+  let image = dataUrl;
+  try {
+    image = await shrinkDataUrl(dataUrl, 900, 0.7);
+  } catch {
+    image = dataUrl;
+  }
+
   let res;
   try {
     res = await fetch("/api/identify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        image: dataUrl,
+        image,
         foundOutside,
         location,
       }),
@@ -122,7 +130,8 @@ export async function identifyRock(dataUrl, opts = {}) {
   }
 
   if (!res.ok) {
-    const err = new Error(data.error || data.hint || `Identify failed (${res.status})`);
+    const detail = data.error || data.hint || `Identify failed (${res.status})`;
+    const err = new Error(detail);
     err.code = "api_error";
     err.detail = data;
     throw err;
