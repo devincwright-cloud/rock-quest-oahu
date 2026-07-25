@@ -1,0 +1,13 @@
+{
+  "name": "rock-quest-oahu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rock Quest Oahu — kid-friendly rock collecting PWA for Oahu",
+  "scripts": {
+    "start": "python3 server.py",
+    "dev": "python3 server.py"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

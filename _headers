@@ -1,0 +1,5 @@
+# Netlify also reads netlify.toml [[headers]].
+# Kept as a backup for common static hosting patterns.
+/*
+  Permissions-Policy: camera=(self), geolocation=(self), microphone=()
+  X-Content-Type-Options: nosniff

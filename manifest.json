@@ -1,0 +1,19 @@
+{
+  "name": "Rock Quest Oahu",
+  "short_name": "Rock Quest Oahu",
+  "description": "Snap rocks, build your Rock Dex, earn adventure badges across Oahu!",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0a2342",
+  "theme_color": "#0a2342",
+  "categories": ["education", "kids", "games"],
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+# Rock Quest Oahu — Netlify production config
+# Static PWA + serverless vision API (HTTPS required for camera & GPS)
+
+[build]
+  publish = "."
+  # No build step — static files + Node functions
+  command = "echo 'Rock Quest Oahu static deploy'"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  # Identify calls xAI vision — allow max timeout on your plan (free = 10s, Pro = 26s)
+  # Netlify UI: Functions → Settings may also control this.
+
+[functions.identify]
+  # Use maximum available on plan (documented; Netlify clamps to plan limit)
+  timeout = 26
+
+# Pretty API paths matching the local python server
+[[redirects]]
+  from = "/api/status"
+  to = "/.netlify/functions/status"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/identify"
+  to = "/.netlify/functions/identify"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/set-key"
+  to = "/.netlify/functions/set-key"
+  status = 200
+  force = true
+
+# Headers: HTTPS site + allow camera/geolocation for the PWA
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # Allow this origin to use camera & GPS (required for Identify + Explore)
+    Permissions-Policy = "camera=(self), geolocation=(self), microphone=()"
+    # Helpful for PWA install
+    Cross-Origin-Opener-Policy = "same-origin-allow-popups"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/js/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/css/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/manifest.json"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# Do not publish secrets or local junk
+[build.processing]
+  skip_processing = false

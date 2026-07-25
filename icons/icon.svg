@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a4a7a"/>
+      <stop offset="55%" stop-color="#0a2342"/>
+      <stop offset="100%" stop-color="#061526"/>
+    </linearGradient>
+    <linearGradient id="r" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffe566"/>
+      <stop offset="100%" stop-color="#ffd60a"/>
+    </linearGradient>
+  </defs>
+  <!-- Navy field -->
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <!-- Subtle geometric diamond ring -->
+  <path d="M256 48 L300 120 L256 192 L212 120 Z" fill="#ffd60a" fill-opacity="0.12"/>
+  <path d="M80 280 L120 320 L80 360 L40 320 Z" fill="#ffd60a" fill-opacity="0.1"/>
+  <path d="M432 280 L472 320 L432 360 L392 320 Z" fill="#ffffff" fill-opacity="0.08"/>
+  <!-- Rock shape in yellow -->
+  <ellipse cx="256" cy="310" rx="150" ry="110" fill="url(#r)" opacity="0.95"/>
+  <path d="M140 300 L200 220 L280 260 L340 200 L390 290 L300 370 L170 360 Z" fill="#fff8d0" opacity="0.92"/>
+  <circle cx="210" cy="280" r="18" fill="#0a2342" opacity="0.2"/>
+  <circle cx="300" cy="310" r="12" fill="#0a2342" opacity="0.15"/>
+  <!-- Chevron band -->
+  <path d="M96 430 L144 406 L192 430 L240 406 L288 430 L336 406 L384 430 L416 414"
+        fill="none" stroke="#ffd60a" stroke-width="6" stroke-opacity="0.55" stroke-linecap="round"/>
+  <text x="256" y="130" text-anchor="middle" font-size="88" font-family="system-ui,sans-serif">🪨</text>
+</svg>
