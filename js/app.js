@@ -1014,7 +1014,8 @@ function bindIdentify() {
     canvas.width = v.videoWidth;
     canvas.height = v.videoHeight;
     canvas.getContext("2d").drawImage(v, 0, 0);
-    state.photoDataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    // Smaller JPEG for faster Netlify/xAI identify
+    state.photoDataUrl = canvas.toDataURL("image/jpeg", 0.72);
     stopCamera();
     state.lastResult = null;
     await render();
@@ -1025,7 +1026,7 @@ function bindIdentify() {
     if (!file) return;
     try {
       stopCamera();
-      state.photoDataUrl = await fileToDataUrl(file);
+      state.photoDataUrl = await fileToDataUrl(file, 960, 0.72);
       state.lastResult = null;
       await render();
     } catch {

@@ -6,6 +6,8 @@ const {
   callVision,
   extractJson,
   buildUserText,
+  assertImageOk,
+  getPrimaryModel,
 } = require("./_lib/vision");
 
 exports.handler = async (event) => {
@@ -22,13 +24,10 @@ exports.handler = async (event) => {
   }
 
   const image = body.image || "";
-  if (typeof image !== "string" || !image.startsWith("data:image")) {
-    return jsonResponse(400, {
-      error: "Expected image as a data:image/...;base64,... URL",
-    });
-  }
-  if (image.length > 12_000_000) {
-    return jsonResponse(400, { error: "Image too large — try a smaller photo" });
+  try {
+    assertImageOk(image);
+  } catch (e) {
+    return jsonResponse(400, { error: e.message || String(e) });
   }
 
   const key = getKey();
@@ -38,7 +37,16 @@ exports.handler = async (event) => {
       needsKey: true,
       demo: false,
       setupHint:
-        "Add XAI_API_KEY in Netlify → Site configuration → Environment variables (from console.x.ai), then redeploy.",
+        "Add XAI_API_KEY in Netlify → Site configuration → Environment variables, then Redeploy the site.",
+    });
+  }
+
+  // Soft check: key shape
+  if (!key.startsWith("xai-") && key.length < 20) {
+    return jsonResponse(503, {
+      error: "XAI_API_KEY looks invalid",
+      needsKey: true,
+      setupHint: "Keys from console.x.ai usually start with xai- … Double-check the Netlify env value (no quotes/spaces).",
     });
   }
 
@@ -62,13 +70,17 @@ exports.handler = async (event) => {
       model: modelUsed,
     });
   } catch (e) {
-    console.error("Identify failed", modelUsed, e);
+    const msg = e.message || String(e);
+    console.error("Identify failed", modelUsed, msg);
     return jsonResponse(502, {
-      error: `Vision API failed: ${e.message || e}`,
-      needsKey: false,
+      error: `Vision API failed: ${msg}`,
+      needsKey: /401|403|API key/i.test(msg),
       demo: false,
-      hint: "Check XAI_API_KEY, model name, and API credits at console.x.ai",
-      rawPreview: (rawText || "").slice(0, 800),
+      modelTried: getPrimaryModel(),
+      hint:
+        "In Netlify: confirm XAI_API_KEY is set, then Redeploy. " +
+        "Also try a smaller/clearer photo. Check function logs under Netlify → Functions → identify.",
+      rawPreview: (rawText || "").slice(0, 500),
     });
   }
 };

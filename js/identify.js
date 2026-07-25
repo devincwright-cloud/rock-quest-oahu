@@ -33,7 +33,7 @@ export function clearVisionStatusCache() {
   visionStatusCache = null;
 }
 
-export async function fileToDataUrl(file, maxSide = 1280, quality = 0.85) {
+export async function fileToDataUrl(file, maxSide = 960, quality = 0.72) {
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
   const w = Math.round(bitmap.width * scale);
@@ -44,6 +44,27 @@ export async function fileToDataUrl(file, maxSide = 1280, quality = 0.85) {
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close?.();
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+/** Shrink an existing data URL (e.g. camera snap) before sending to the API */
+export async function shrinkDataUrl(dataUrl, maxSide = 960, quality = 0.72) {
+  if (!dataUrl || !dataUrl.startsWith("data:image")) return dataUrl;
+  // Already small enough (~under ~700KB base64)
+  if (dataUrl.length < 700_000) return dataUrl;
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
   return canvas.toDataURL("image/jpeg", quality);
 }
 

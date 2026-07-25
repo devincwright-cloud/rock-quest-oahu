@@ -1,6 +1,6 @@
 /**
  * Shared xAI vision helpers for Netlify functions.
- * Port of rock-quest/server.py identify logic.
+ * Optimized for short serverless timeouts (try 1–2 fast paths only).
  */
 
 const SYSTEM_PROMPT = `You are Rock Quest Oahu's expert geology field-guide for kids (ages 7–14) and parents.
@@ -9,41 +9,31 @@ Identify rocks and minerals from a PHOTO accurately.
 SCOPE (CRITICAL):
 - Identify specimens from ANYWHERE in the world.
 - Default: NO regional bias. Only if the user message includes "OUTDOOR FIND CONTEXT" may you use geography as a SOFT prior.
-- Even with outdoor context, visual evidence ALWAYS overrides location (never force basalt/scoria over clear pyrite/quartz/etc.).
-- Do NOT default to basalt or scoria. Those are only correct when the photo actually looks like volcanic lava rock.
-- Kids often photograph: field finds, polished/tumbled stones, and rock-shop specimens. Identify those correctly too.
+- Even with outdoor context, visual evidence ALWAYS overrides location.
+- Do NOT default to basalt or scoria unless the photo clearly shows volcanic lava rock.
 
 OUTPUT FORMAT (MANDATORY):
 - Reply with EXACTLY ONE JSON object. Nothing else.
-- No markdown fences (no \`\`\`). No text before or after the JSON. No second object.
+- No markdown fences. No text before or after the JSON.
 - Start with { and end with }.
 
-VISUAL MATCHING (CRITICAL):
-1. Base the ID ONLY on what is visible: color, luster (metallic vs glassy vs dull), crystal shape, texture, polish, banding, transparency.
-2. Match THIS specimen — not a fixed “common local rocks” list.
-3. Common lookalikes kids photograph (recognize these when they fit):
-   - Pyrite: brassy/metallic gold, often cubic or glittery metallic (NOT yellow paint dirt)
-   - Quartz: clear, white, milky, rose (pink), smoky (brown-gray), often glassy/crystal
-   - Amethyst: purple quartz
-   - Citrine: yellow/orange quartz (often polished)
-   - Other rock-shop favorites: jasper, agate, tiger’s eye, howlite, sodalite, turquoise-looking stones, fluorite, calcite, hematite, magnetite, mica, feldspar, granite, sandstone, limestone, obsidian, etc.
-4. If polished/tumbled/store-bought: still identify the mineral/rock — do NOT reclassify as basalt/scoria.
-5. Top 2–3 candidates that fit THIS photo; confidences 0–1, best first. Prefer specific names.
-6. rarity: common | uncommon | rare | ultra
-7. NEVER hype money. Kid-friendly short sentences.
-8. fieldTests: 2–3 SPECIFIC yes/no questions for THAT identification vs lookalikes (expectsYes true/false, weight 0.05–0.12).
-9. If unidentifiable or not a rock, say so with low confidence.
+VISUAL MATCHING:
+1. Base the ID ONLY on visible color, luster, crystal shape, texture, polish, banding, transparency.
+2. Kids often photograph field finds, tumbled stones, and rock-shop specimens — identify those correctly.
+3. Top 2–3 candidates; confidences 0–1; rarity: common | uncommon | rare | ultra.
+4. fieldTests: 2–3 specific yes/no questions (expectsYes, weight 0.05–0.12).
+5. NEVER hype money. Kid-friendly short sentences.
 
-JSON SCHEMA (single object):
+JSON SCHEMA:
 {
-  "summary": "one friendly sentence about what you see",
+  "summary": "one friendly sentence",
   "candidates": [
     {
       "name": "Pyrite",
       "rockId": "pyrite",
       "confidence": 0.72,
       "rarity": "uncommon",
-      "properties": { "hardness": "6–6.5", "luster": "metallic", "appearance": "brassy gold, often cubic" },
+      "properties": { "hardness": "6–6.5", "luster": "metallic", "appearance": "brassy gold" },
       "facts": ["Also called fool's gold."],
       "fieldTests": [
         {"id": "metallic", "question": "Does it look metallic brassy gold?", "expectsYes": true, "weight": 0.1}
@@ -55,11 +45,17 @@ JSON SCHEMA (single object):
 }
 `;
 
+function getPrimaryModel() {
+  // Prefer a current vision-capable model. Override with XAI_VISION_MODEL in Netlify env.
+  return (process.env.XAI_VISION_MODEL || "grok-4.5").trim();
+}
+
 function getModelList() {
-  const primary = (process.env.XAI_VISION_MODEL || "grok-4.5").trim();
-  const list = [primary, "grok-4.5", "grok-2-vision-latest", "grok-2-vision-1212"];
+  // Keep list short — Netlify free functions often have ~10s limit
+  const primary = getPrimaryModel();
+  const list = [primary, "grok-4.5", "grok-2-vision-latest"];
   const seen = new Set();
-  return list.filter((m) => m && !seen.has(m) && seen.add(m));
+  return list.filter((m) => m && !seen.has(m) && seen.add(m)).slice(0, 2);
 }
 
 function getKey() {
@@ -104,7 +100,7 @@ function parseBody(event) {
   return JSON.parse(raw);
 }
 
-async function httpJson(url, payload, key, timeoutMs = 90000) {
+async function httpJson(url, payload, key, timeoutMs = 20000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -123,12 +119,23 @@ async function httpJson(url, payload, key, timeoutMs = 90000) {
     try {
       data = JSON.parse(text);
     } catch {
-      data = { raw: text.slice(0, 2000) };
+      data = { raw: text.slice(0, 1500) };
     }
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 2000)}`);
+      const msg =
+        data?.error?.message ||
+        data?.error ||
+        (typeof data?.raw === "string" ? data.raw : text.slice(0, 800));
+      const err = new Error(`HTTP ${res.status}: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
+      err.status = res.status;
+      throw err;
     }
     return data;
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error("xAI request timed out — try a smaller/clearer photo");
+    }
+    throw e;
   } finally {
     clearTimeout(t);
   }
@@ -170,72 +177,89 @@ function extractOutputText(data) {
   return "";
 }
 
+/**
+ * Fast path: one chat-completions vision call, then optional responses fallback.
+ * Avoids 6–8 sequential attempts that blow Netlify's time limit.
+ */
 async function callVision(key, imageDataUrl, userText) {
   const base = getBase();
   const models = getModelList();
   const errors = [];
+  const system =
+    SYSTEM_PROMPT +
+    "\n\nIMPORTANT: Output exactly one JSON object. No markdown. No prose outside JSON.";
 
   for (const model of models) {
-    // Responses API
+    // 1) Chat Completions (most reliable for data:image URLs)
     try {
       const payload = {
         model,
         temperature: 0.1,
-        instructions:
-          SYSTEM_PROMPT +
-          "\n\nIMPORTANT: Output exactly one JSON object. No markdown. No prose outside JSON.",
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_image", image_url: imageDataUrl, detail: "high" },
-              { type: "input_text", text: userText },
-            ],
-          },
-        ],
-      };
-      const data = await httpJson(`${base}/responses`, payload, key);
-      const text = extractOutputText(data);
-      if (text && text.trim()) return { text, modelUsed: `responses:${model}` };
-      errors.push(`responses:${model}: empty text`);
-    } catch (e) {
-      errors.push(`responses:${model}: ${e.message || e}`);
-    }
-
-    // Chat Completions
-    try {
-      const payload = {
-        model,
-        temperature: 0.1,
+        max_tokens: 1200,
         messages: [
-          {
-            role: "system",
-            content:
-              SYSTEM_PROMPT +
-              "\n\nIMPORTANT: Output exactly one JSON object. No markdown. No prose outside JSON.",
-          },
+          { role: "system", content: system },
           {
             role: "user",
             content: [
-              { type: "image_url", image_url: { url: imageDataUrl, detail: "high" } },
+              {
+                type: "image_url",
+                image_url: { url: imageDataUrl, detail: "low" },
+              },
               { type: "text", text: userText },
             ],
           },
         ],
       };
-      const data = await httpJson(`${base}/chat/completions`, payload, key);
+      const data = await httpJson(`${base}/chat/completions`, payload, key, 22000);
       let text = data?.choices?.[0]?.message?.content || "";
       if (Array.isArray(text)) {
         text = text.map((p) => (typeof p === "object" ? p?.text || "" : String(p))).join("\n");
       }
-      if (text && String(text).trim()) return { text: String(text), modelUsed: `chat:${model}` };
+      if (text && String(text).trim()) {
+        return { text: String(text), modelUsed: `chat:${model}` };
+      }
       errors.push(`chat:${model}: empty text`);
     } catch (e) {
       errors.push(`chat:${model}: ${e.message || e}`);
+      // Auth errors: stop immediately
+      if (String(e.message || "").includes("HTTP 401") || String(e.message || "").includes("HTTP 403")) {
+        throw new Error(
+          "xAI rejected the API key (401/403). Check XAI_API_KEY in Netlify Environment variables and that the key is active at console.x.ai"
+        );
+      }
+    }
+
+    // 2) Responses API once for this model
+    try {
+      const payload = {
+        model,
+        temperature: 0.1,
+        instructions: system,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_image", image_url: imageDataUrl, detail: "low" },
+              { type: "input_text", text: userText },
+            ],
+          },
+        ],
+      };
+      const data = await httpJson(`${base}/responses`, payload, key, 22000);
+      const text = extractOutputText(data);
+      if (text && text.trim()) return { text, modelUsed: `responses:${model}` };
+      errors.push(`responses:${model}: empty text`);
+    } catch (e) {
+      errors.push(`responses:${model}: ${e.message || e}`);
+      if (String(e.message || "").includes("HTTP 401") || String(e.message || "").includes("HTTP 403")) {
+        throw new Error(
+          "xAI rejected the API key (401/403). Check XAI_API_KEY in Netlify Environment variables."
+        );
+      }
     }
   }
 
-  throw new Error("All vision attempts failed → " + errors.slice(0, 6).join(" | "));
+  throw new Error("All vision attempts failed → " + errors.slice(0, 4).join(" | "));
 }
 
 function extractJson(text) {
@@ -250,7 +274,6 @@ function extractJson(text) {
     .replace(/\u2019/g, "'");
 
   const tryParse = (blob) => {
-    // Use JSON.parse; if trailing junk, find balanced object
     try {
       return JSON.parse(blob);
     } catch {
@@ -287,8 +310,10 @@ function extractJson(text) {
       throw new Error("JSON root must be object");
     }
     return obj;
-  } catch (e) {
-    throw new Error("Model did not return a parseable JSON object. Preview: " + String(text).slice(0, 400));
+  } catch {
+    throw new Error(
+      "Model did not return a parseable JSON object. Preview: " + String(text).slice(0, 400)
+    );
   }
 }
 
@@ -309,42 +334,53 @@ function buildUserText(body) {
     geoNote =
       `\n\nOUTDOOR FIND CONTEXT (soft prior only): The kid says this was found outside${placeBit} ` +
       `(approx GPS ${location.lat}, ${location.lng}). ` +
-      "You MAY gently prefer rocks that are plausible for that geography/geology. " +
-      "CRITICAL: Visual evidence ALWAYS wins. Do not invent a local ID that contradicts the photo.";
+      "You MAY gently prefer rocks that are plausible for that geography. " +
+      "CRITICAL: Visual evidence ALWAYS wins.";
   }
 
   if (!foundOutside) {
     return (
       "Identify the rock or mineral in this photograph using VISUAL EVIDENCE ONLY. " +
-      "Do NOT apply any regional or location bias. Do not assume Hawaii, beach, or volcano. " +
-      "Look carefully at color, luster (metallic vs glassy), crystal shape, polish/tumble, texture, and transparency. " +
-      "If it looks like pyrite, quartz, amethyst, citrine, agate, jasper, or another rock-shop/specimen stone, name that. " +
-      "Do not default to basalt or scoria unless the photo clearly shows volcanic lava rock. " +
-      "Reply with EXACTLY ONE JSON object matching the schema — no markdown, no extra commentary, no second object."
+      "Do NOT apply regional bias. Do not assume Hawaii. " +
+      "Look at color, luster, crystal shape, polish, texture. " +
+      "Reply with EXACTLY ONE JSON object matching the schema."
     );
   }
 
   return (
     "Identify the rock or mineral in this photograph. " +
-    "Primary evidence is ALWAYS what you see: color, luster (metallic vs glassy), crystal shape, " +
-    "polish/tumble, texture, and transparency. " +
-    "Identify specimens from anywhere in the world. " +
-    "If it looks like pyrite, quartz (clear/rose/smoky), amethyst, citrine, agate, jasper, " +
-    "or other rock-shop/polished stones, name those correctly. " +
-    "Do not default to basalt or scoria unless the photo clearly shows volcanic lava rock." +
+    "Primary evidence is ALWAYS visual. " +
+    "Do not default to basalt/scoria unless the photo shows volcanic lava rock." +
     geoNote +
-    "\nReply with EXACTLY ONE JSON object matching the schema — no markdown, no extra commentary, no second object."
+    "\nReply with EXACTLY ONE JSON object matching the schema."
   );
+}
+
+/**
+ * Downsize huge data URLs inside the function if the client sent a large photo.
+ * Keeps base64 but strips to a shorter payload when possible (JPEG only).
+ * (No re-encode without canvas; just pass through — client handles resize.)
+ */
+function assertImageOk(image) {
+  if (typeof image !== "string" || !image.startsWith("data:image")) {
+    throw new Error("Expected image as a data:image/...;base64,... URL");
+  }
+  // Netlify request body limits — keep under ~4.5MB base64
+  if (image.length > 5_500_000) {
+    throw new Error("Image too large for the live server — take a closer photo or crop tighter");
+  }
 }
 
 module.exports = {
   SYSTEM_PROMPT,
   getKey,
   getModelList,
+  getPrimaryModel,
   jsonResponse,
   optionsResponse,
   parseBody,
   callVision,
   extractJson,
   buildUserText,
+  assertImageOk,
 };
