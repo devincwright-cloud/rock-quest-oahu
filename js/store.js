@@ -145,15 +145,34 @@ export async function getPendingIdentifies() {
 
 export async function addPendingIdentify(entry) {
   const list = await getPendingIdentifies();
+  // Lean location only — never store bulky objects that bloat the later upload
+  let location = null;
+  if (entry.location && entry.location.lat != null) {
+    location = {
+      lat: Number(entry.location.lat),
+      lng: Number(entry.location.lng),
+      placeName: String(entry.location.placeName || "").slice(0, 80),
+      label: String(entry.location.label || "").slice(0, 120),
+    };
+  }
+  const dataUrl = String(entry.dataUrl || "").replace(/\s+/g, "");
+  if (!dataUrl.startsWith("data:image")) {
+    throw new Error("Cannot save — photo data is missing.");
+  }
+  // Soft size guard (caller should compress first)
+  if (dataUrl.length > 1_200_000) {
+    throw new Error("Photo is too large to save for later — crop closer to the rock.");
+  }
   const item = {
     id: entry.id || `pend_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    dataUrl: entry.dataUrl,
+    dataUrl,
     foundOutside: !!entry.foundOutside,
-    location: entry.location || null,
+    location,
     note: entry.note || "",
     createdAt: entry.createdAt || Date.now(),
+    chars: dataUrl.length,
   };
-  const next = [item, ...list.filter((p) => p.id !== item.id)].slice(0, 10);
+  const next = [item, ...list.filter((p) => p.id !== item.id)].slice(0, 8);
   await setMeta("pendingIdentifies", next);
   return item;
 }

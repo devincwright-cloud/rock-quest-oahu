@@ -365,9 +365,15 @@ function assertImageOk(image) {
   if (typeof image !== "string" || !image.startsWith("data:image")) {
     throw new Error("Expected image as a data:image/...;base64,... URL");
   }
-  // Netlify request body limits — keep under ~4.5MB base64
-  if (image.length > 5_500_000) {
-    throw new Error("Image too large for the live server — take a closer photo or crop tighter");
+  // Prefer client to stay ~650KB; hard cap before Netlify gateway rejects
+  if (image.length > 4_500_000) {
+    throw new Error(
+      "Image too large for the live server — crop closer to the rock and try again"
+    );
+  }
+  // Strip accidental whitespace that breaks some parsers
+  if (/\s/.test(image.slice(0, 100))) {
+    throw new Error("Image data has invalid whitespace — re-save the photo and try again");
   }
 }
 

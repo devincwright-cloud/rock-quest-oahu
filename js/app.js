@@ -28,9 +28,11 @@ import {
 import {
   clearVisionStatusCache,
   compressForUpload,
+  compressToBudget,
   fileToDataUrl,
   getVisionStatus,
   identifyRock,
+  MAX_PENDING_BASE64_CHARS,
   saveApiKey,
   verifyChallengePhoto,
 } from "./identify.js";
@@ -1645,15 +1647,20 @@ function bindIdentify() {
       const list = await getPendingIdentifies();
       const item = list.find((p) => p.id === id);
       if (!item) return;
+      if (!item.dataUrl || !String(item.dataUrl).includes("base64")) {
+        toast("That saved photo is damaged — remove it and take a new one.", "error");
+        return;
+      }
       state.photoDataUrl = item.dataUrl;
       state.foundOutside = !!item.foundOutside;
       state.lastResult = null;
-      await render();
+      // Don't full re-render first (keeps status area); identify shows progress
       await runIdentify({
         dataUrl: item.dataUrl,
         foundOutside: item.foundOutside,
         location: item.location,
         pendingId: item.id,
+        fromPending: true,
       });
     });
   });
@@ -1769,16 +1776,28 @@ async function savePhotoForLater(dataUrl = null, foundOutside = null) {
     return;
   }
   try {
-    const compressed = await compressForUpload(photo, { maxSide: 800, quality: 0.6 });
+    // Aggressive budget so "identify later" always re-uploads cleanly on Wi‑Fi
+    const prepared = await compressToBudget(photo, {
+      maxChars: MAX_PENDING_BASE64_CHARS,
+      maxSide: 640,
+      quality: 0.48,
+    });
     let location = null;
     const outdoor = foundOutside != null ? foundOutside : state.foundOutside;
-    if (outdoor && state.outdoorLocation) location = state.outdoorLocation;
+    if (outdoor && state.outdoorLocation) {
+      location = {
+        lat: state.outdoorLocation.lat,
+        lng: state.outdoorLocation.lng,
+        placeName: state.outdoorLocation.placeName || "",
+        label: state.outdoorLocation.label || "",
+      };
+    }
     await addPendingIdentify({
-      dataUrl: compressed,
+      dataUrl: prepared.dataUrl,
       foundOutside: outdoor,
       location,
     });
-    toast("📦 Saved! Identify later when signal is better.", "success");
+    toast("📦 Saved small for later — identify on Wi‑Fi!", "success");
     state.photoDataUrl = null;
     state.lastResult = null;
     await render();
@@ -1855,10 +1874,22 @@ async function runIdentify(opts = {}) {
       state.outdoorLocation = null;
     }
 
+    // Slim location for outdoor (and for pending re-runs)
+    let leanLocation = locationPayload;
+    if (leanLocation && leanLocation.lat != null) {
+      leanLocation = {
+        lat: leanLocation.lat,
+        lng: leanLocation.lng,
+        placeName: leanLocation.placeName || "",
+        label: leanLocation.label || "",
+      };
+    }
+
     const result = await identifyRock(photo, {
       foundOutside,
-      location: locationPayload,
-      maxRetries: 3,
+      location: leanLocation,
+      maxRetries: pendingId ? 4 : 3,
+      fromPending: !!pendingId,
       onProgress: (p) => setIdentifyProgress(p),
     });
     state.lastResult = result;
@@ -1889,7 +1920,7 @@ async function runIdentify(opts = {}) {
     await evaluateBadges({ celebrate: true });
     if (pendingId) await render();
   } catch (e) {
-    console.error(e);
+    console.error("runIdentify failed", e.code, e.message, e.detail);
     if (e.code === "needs_key") {
       clearVisionStatusCache();
       state.visionStatus = await getVisionStatus(true);
@@ -1900,24 +1931,45 @@ async function runIdentify(opts = {}) {
         </div>`;
     } else {
       const canSave = !!state.photoDataUrl || !!photo;
+      const kind =
+        e.code === "bad_image"
+          ? "Photo problem"
+          : e.code === "payload" || e.code === "server_502"
+            ? "Upload / server problem"
+            : e.code === "timeout" || e.code === "offline"
+              ? "Connection problem"
+              : "Couldn’t finish identify";
+      const tip =
+        e.code === "bad_image"
+          ? "The saved file may be damaged. Take a new clear photo of the rock."
+          : e.code === "payload" || e.code === "server_502"
+            ? "We shrink trail photos automatically — tap Try again (smaller upload). If it keeps failing, crop tighter on the rock."
+            : "On Wi‑Fi, tap Try again. Saved photos are re-compressed before each attempt.";
       status.innerHTML = `
         <div class="setup-error card">
-          <h3>Couldn’t finish identify</h3>
+          <h3>${escapeHtml(kind)}</h3>
           <p class="error-text">${escapeHtml(e.message)}</p>
-          <p class="muted small">Weak signal is common outdoors. We already retried automatically.</p>
+          <p class="muted small">${escapeHtml(tip)}</p>
           <div class="id-fail-actions">
-            <button type="button" class="btn btn-primary" id="btn-retry-identify">🔁 Try again</button>
+            <button type="button" class="btn btn-primary" id="btn-retry-identify">🔁 Try again (smaller photo)</button>
             ${
-              canSave
+              canSave && e.code !== "bad_image"
                 ? `<button type="button" class="btn btn-secondary" id="btn-fail-save-later">📦 Save for later</button>`
                 : ""
             }
           </div>
         </div>`;
       $("#btn-retry-identify")?.addEventListener("click", () =>
-        runIdentify({ dataUrl: photo, foundOutside, location: opts.location, pendingId })
+        runIdentify({
+          dataUrl: photo,
+          foundOutside,
+          location: opts.location,
+          pendingId,
+        })
       );
-      $("#btn-fail-save-later")?.addEventListener("click", () => savePhotoForLater(photo, foundOutside));
+      $("#btn-fail-save-later")?.addEventListener("click", () =>
+        savePhotoForLater(photo, foundOutside)
+      );
     }
     toast(e.message, "error");
   } finally {
