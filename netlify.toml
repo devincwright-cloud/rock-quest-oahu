@@ -35,6 +35,15 @@
   status = 200
   force = true
 
+[[redirects]]
+  from = "/api/verify-challenge"
+  to = "/.netlify/functions/verify-challenge"
+  status = 200
+  force = true
+
+[functions."verify-challenge"]
+  timeout = 26
+
 # Headers: HTTPS site + allow camera/geolocation for the PWA
 [[headers]]
   for = "/*"

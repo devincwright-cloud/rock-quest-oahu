@@ -1,5 +1,5 @@
 /* Rock Quest Oahu service worker — cache shell for offline collection browsing */
-const CACHE = "rock-quest-oahu-v11";
+const CACHE = "rock-quest-oahu-v12";
 const ASSETS = [
   "/",
   "/index.html",
@@ -13,6 +13,9 @@ const ASSETS = [
   "/js/badges.js",
   "/js/explore.js",
   "/js/geo.js",
+  "/js/permissions.js",
+  "/js/media.js",
+  "/js/share.js",
   "/js/data/catalog.js",
   "/js/data/spots.js",
   "/js/data/spot-missions.js",

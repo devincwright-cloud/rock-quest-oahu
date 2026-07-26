@@ -15,6 +15,8 @@ export const PUBLIC_SPOTS = [
     area: "Kailua, Oahu",
     lat: 21.3925,
     lng: -157.7156,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "scoria", "andesite"],
     rockHunt:
       "Ridge rock hunt: Spot charcoal basalt, holey scoria, and gray andesite along the trail. Feel for bubbly “lava sponge” textures and rusty weathered edges — stay on the path!",
@@ -92,8 +94,11 @@ export const PUBLIC_SPOTS = [
     id: "makapuu",
     name: "Makapuʻu Point Lighthouse Trail",
     area: "East Oahu",
-    lat: 21.3097,
-    lng: -157.6497,
+    // Pin near mid-trail so check-in works along the paved path, not only at the far lighthouse
+    lat: 21.3072,
+    lng: -157.6502,
+    checkInRadiusKm: 2.1,
+    challengeRadiusKm: 2.3,
     kinds: ["basalt", "scoria", "olivine"],
     rockHunt:
       "Trail rock hunt: Dark basalt and bubbly scoria everywhere — hunt for lucky green olivine (peridot) sparkles in the lava! Compare rough trail rock vs smoother pieces near the path.",
@@ -103,6 +108,8 @@ export const PUBLIC_SPOTS = [
       emoji: "🗼",
       title: "Makapuʻu Lighthouse",
       prompt: "Snap the red-roofed Makapuʻu lighthouse from the trail!",
+      verifyTarget:
+        "the Makapuʻu lighthouse itself — white lighthouse tower with a distinctive red roof clearly visible (not just trail, ocean, or rocks)",
     },
   },
   {
@@ -111,6 +118,8 @@ export const PUBLIC_SPOTS = [
     area: "East Oahu",
     lat: 21.318,
     lng: -157.665,
+    checkInRadiusKm: 0.9,
+    challengeRadiusKm: 1.0,
     kinds: ["basalt", "scoria"],
     why: "Quick roadside view of the rugged east coastline.",
     tips: "Park only in pull-off. Watch traffic.",
@@ -118,6 +127,8 @@ export const PUBLIC_SPOTS = [
       emoji: "👀",
       title: "Coastline lookout",
       prompt: "Snap the big Makapuʻu coastline view from the lookout!",
+      verifyTarget:
+        "a wide coastal lookout view of Makapuʻu cliffs and ocean from the highway overlook (not the lighthouse tower close-up, not a random trail selfie without the coast vista)",
     },
   },
   {
@@ -186,6 +197,8 @@ export const PUBLIC_SPOTS = [
     area: "Hawaii Kai, Oahu",
     lat: 21.285,
     lng: -157.685,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "tuff", "scoria"],
     why: "Cinder cone and crater — classic east Honolulu volcano story.",
     tips: "Stairs are steep — go with a grown-up.",
@@ -308,6 +321,8 @@ export const PUBLIC_SPOTS = [
     area: "Honolulu, Oahu",
     lat: 21.2619,
     lng: -157.8058,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "tuff", "scoria"],
     rockHunt:
       "Crater rock hunt: Look for dark basalt, holey scoria, and pale tuff (old volcanic ash rock stuck together). Feel the rough lava underfoot — photo & learn; monument rules often say no collecting!",
@@ -355,6 +370,8 @@ export const PUBLIC_SPOTS = [
     area: "Mānoa Valley, Oahu",
     lat: 21.333,
     lng: -157.8,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "conglomerate"],
     why: "Rainforest valley cut through volcanic rock.",
     tips: "Muddy trail — go with a grown-up.",
@@ -614,6 +631,8 @@ export const PUBLIC_SPOTS = [
     area: "North Shore, Oahu",
     lat: 21.641,
     lng: -158.066,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "coral"],
     why: "Famous bay with volcanic cliffs and beach rocks (view safely).",
     tips: "Huge winter waves. Dry sand only with an adult.",
@@ -629,6 +648,8 @@ export const PUBLIC_SPOTS = [
     area: "North Shore, Oahu",
     lat: 21.651,
     lng: -158.063,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "coral", "limestone"],
     rockHunt:
       "Tide-pool rock hunt: Jagged black basalt, pale limestone, and coral rubble textures. Spot shiny wet rock vs dry matte rock — adult help near sharp, wet edges!",
@@ -753,6 +774,8 @@ export const PUBLIC_SPOTS = [
     area: "Waiʻanae Coast, Oahu",
     lat: 21.556,
     lng: -158.242,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "scoria", "coral"],
     why: "End-of-the-road west coast — wild volcanic shoreline.",
     tips: "Remote. Pack water. No cliff climbing.",
@@ -768,6 +791,8 @@ export const PUBLIC_SPOTS = [
     area: "West Oahu",
     lat: 21.558,
     lng: -158.248,
+    checkInRadiusKm: 1.8,
+    challengeRadiusKm: 2.0,
     kinds: ["basalt", "scoria"],
     why: "Long coastal hike toward the island’s western tip — pure lava rock country.",
     tips: "Hot, exposed trail. Stay on path.",
@@ -909,17 +934,29 @@ export function formatDriveTime(min) {
 
 /** Default challenge if a spot has none */
 export function getPhotoChallenge(spot) {
-  if (spot?.photoChallenge) return spot.photoChallenge;
+  if (spot?.photoChallenge) {
+    const ch = spot.photoChallenge;
+    return {
+      ...ch,
+      // Used by vision verify — must describe the actual subject, not "near the place"
+      verifyTarget:
+        ch.verifyTarget ||
+        ch.prompt ||
+        `the main famous feature of ${spot.name || "this place"} clearly visible in the photo`,
+    };
+  }
   if (spot?.generic) {
     return {
       emoji: "📸",
       title: "Adventure photo",
       prompt: "Snap something cool about this place!",
+      verifyTarget: "a clear outdoor beach, trail, or park scene that matches a real adventure stop",
     };
   }
   return {
     emoji: "📸",
     title: "Place highlight",
     prompt: `Snap the main highlight of ${spot?.name || "this place"}!`,
+    verifyTarget: `the main famous feature of ${spot?.name || "this place"} clearly visible (not just random nearby scenery)`,
   };
 }

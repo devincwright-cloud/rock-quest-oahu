@@ -483,6 +483,76 @@ h1, h2, h3 {
     linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.45), transparent);
 }
 
+/* Sticky adventure mode bar */
+.sticky-adventure-bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: -0.25rem 0 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(20, 70, 120, 0.95), rgba(10, 35, 65, 0.98));
+  border: 2px solid rgba(255, 214, 10, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.sticky-adventure-info {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.sticky-adventure-info strong {
+  color: var(--primary);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sticky-adventure-info span {
+  font-weight: 800;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 52vw;
+}
+.sticky-adventure-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+/* Camera zoom / flip toolbar */
+.cam-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0.55rem;
+}
+.zoom-label {
+  font-weight: 900;
+  font-size: 0.85rem;
+  color: var(--primary);
+  min-width: 2.4rem;
+  text-align: center;
+}
+.adv-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+  align-items: center;
+}
+.app-main:has(.sticky-adventure-bar) {
+  padding-top: 0.65rem;
+}
+
 .demo-banner {
   background: rgba(251, 191, 36, 0.15);
   border: 1px solid rgba(251, 191, 36, 0.35);

@@ -383,4 +383,5 @@ module.exports = {
   extractJson,
   buildUserText,
   assertImageOk,
+  getBase,
 };

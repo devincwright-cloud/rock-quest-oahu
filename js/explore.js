@@ -13,29 +13,31 @@ import { CHANCE_META, SPOT_MISSIONS } from "./data/spot-missions.js";
 /** How many places to show first / each “Show more” tap */
 export const SPOTS_PAGE_SIZE = 6;
 
-/** Check-in radius in km (~500–800m depending on GPS accuracy) */
-export const CHECKIN_RADIUS_KM = 0.75;
+/**
+ * Default check-in radius (~1.2 km). Real phone GPS on Oahu trails drifts;
+ * long hikes can override per-spot with checkInRadiusKm.
+ */
+export const CHECKIN_RADIUS_KM = 1.2;
 
-/** Slightly larger than check-in so trail lookouts still count for photo challenges */
-export const PHOTO_CHALLENGE_RADIUS_KM = 1.0;
+/** Photo challenge proximity — still requires vision match for unlock */
+export const PHOTO_CHALLENGE_RADIUS_KM = 1.6;
 
-export function getPosition(timeout = 12000) {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error("Location not available on this device."));
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) =>
-        resolve({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-        }),
-      (err) => reject(err),
-      { enableHighAccuracy: true, timeout, maximumAge: 60_000 }
-    );
-  });
+export { getPosition, watchPosition, clearWatch } from "./permissions.js";
+
+/** Effective check-in radius for a spot, inflated slightly by GPS accuracy */
+export function checkInRadiusKm(spot, loc = null) {
+  const base = spot?.checkInRadiusKm ?? CHECKIN_RADIUS_KM;
+  const accM = loc?.accuracy != null && Number.isFinite(loc.accuracy) ? loc.accuracy : 40;
+  // Add up to 250 m for poor GPS, never less than base
+  const padKm = Math.min(0.25, Math.max(0, (accM - 25) / 1000));
+  return base + padKm;
+}
+
+export function photoChallengeRadiusKm(spot, loc = null) {
+  const base = spot?.challengeRadiusKm ?? PHOTO_CHALLENGE_RADIUS_KM;
+  const accM = loc?.accuracy != null && Number.isFinite(loc.accuracy) ? loc.accuracy : 40;
+  const padKm = Math.min(0.3, Math.max(0, (accM - 25) / 1000));
+  return base + padKm;
 }
 
 export function regionFlavor(loc) {
@@ -107,12 +109,14 @@ export function suggestSpots(loc, rangeKey = "medium", collectorStats = null) {
     const driveMin = estimateDriveMinutes(loc, s, flavor);
     // Exclusive band: Short / Medium / Longer never overlap
     const inRange = driveTimeInRange(driveMin, rangeKey);
+    const cinR = checkInRadiusKm(s, loc);
     return {
       ...s,
       distanceKm: d,
       driveMin,
       inRange,
-      canCheckIn: d <= CHECKIN_RADIUS_KM,
+      canCheckIn: d <= cinR,
+      checkInRadiusKm: cinR,
       driveLabel: formatDriveTime(driveMin),
     };
   });
@@ -300,14 +304,17 @@ export function canCheckInAt(spot, loc) {
   if (spot.generic) return { ok: true, reason: null };
   if (spot.lat == null) return { ok: false, reason: "This spot needs a map pin." };
   const d = distanceKm(loc, spot);
-  if (d <= CHECKIN_RADIUS_KM) return { ok: true, reason: null, distanceKm: d };
+  const radius = checkInRadiusKm(spot, loc);
+  if (d <= radius) return { ok: true, reason: null, distanceKm: d, radiusKm: radius };
   const flavor = regionFlavor(loc);
   const driveMin = estimateDriveMinutes(loc, spot, flavor);
+  const metersOut = Math.round((d - radius) * 1000);
   return {
     ok: false,
-    reason: `Get closer! About ${formatDriveTime(driveMin)} away (need to be at the spot to check in).`,
+    reason: `Almost! About ${metersOut > 80 ? formatDriveTime(driveMin) : `${metersOut} m`} farther for check-in (GPS can wobble on trails — walk a bit and retry).`,
     distanceKm: d,
     driveMin,
+    radiusKm: radius,
   };
 }
 
@@ -322,17 +329,19 @@ export function formatDistance(km) {
  * Spots the user is physically near enough to photo-challenge / check in.
  * Sorted closest-first. Pass completedIds (Set of spotId) to flag done challenges.
  */
-export function getNearbyChallengeSpots(loc, { completedIds = new Set(), radiusKm = PHOTO_CHALLENGE_RADIUS_KM } = {}) {
+export function getNearbyChallengeSpots(loc, { completedIds = new Set(), radiusKm = null } = {}) {
   if (!loc) return [];
   return PUBLIC_SPOTS.filter((s) => !s.generic && s.lat != null)
     .map((s) => {
       const d = distanceKm(loc, s);
       const challenge = getPhotoChallenge(s);
+      const chR = radiusKm != null ? radiusKm : photoChallengeRadiusKm(s, loc);
+      const cinR = checkInRadiusKm(s, loc);
       return {
         ...s,
         distanceKm: d,
-        canCheckIn: d <= CHECKIN_RADIUS_KM,
-        canPhotoChallenge: d <= radiusKm,
+        canCheckIn: d <= cinR,
+        canPhotoChallenge: d <= chR,
         challengeDone: completedIds.has(s.id),
         photoChallenge: challenge,
         driveLabel: formatDistance(d),

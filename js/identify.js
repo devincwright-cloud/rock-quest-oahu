@@ -1,5 +1,8 @@
 import { catalogById, normalizeRockId, normalizeRarity } from "./data/catalog.js";
 import { normalizeFieldTests, testsForRock } from "./fieldtests.js";
+import { compressForUpload, shrinkDataUrl, fileToDataUrl } from "./media.js";
+
+export { compressForUpload, shrinkDataUrl, fileToDataUrl };
 
 /** Client-side prompt is unused for ID (server owns the vision prompt). Kept for status/debug. */
 export const SYSTEM_PROMPT = `Worldwide rock/mineral ID from photo only. No Hawaii bias. JSON only.`;
@@ -40,69 +43,13 @@ function sleep(ms) {
 function isRetryableError(err) {
   if (!err) return false;
   if (err.code === "needs_key") return false;
-  if (err.code === "offline") return true;
-  if (err.code === "timeout") return true;
-  if (err.code === "network") return true;
+  if (err.code === "offline" || err.code === "timeout" || err.code === "network") return true;
   const msg = String(err.message || "").toLowerCase();
   if (/timed out|timeout|network|fetch|offline|failed to fetch|502|503|504|abort/i.test(msg)) {
     return true;
   }
-  // Don't retry clear client/auth errors
   if (/401|403|api key|not configured|too large|invalid json/i.test(msg)) return false;
   return err.code === "api_error";
-}
-
-/**
- * Always compress for upload — better chance on weak cell signal.
- * @param {string|File|Blob} source data URL or File
- * @param {{ maxSide?: number, quality?: number }} [opts]
- */
-export async function compressForUpload(source, opts = {}) {
-  const maxSide = opts.maxSide ?? 800;
-  const quality = opts.quality ?? 0.62;
-
-  if (typeof source === "string" && source.startsWith("data:image")) {
-    return shrinkDataUrl(source, maxSide, quality, true);
-  }
-  if (source instanceof Blob || (typeof File !== "undefined" && source instanceof File)) {
-    return fileToDataUrl(source, maxSide, quality);
-  }
-  return source;
-}
-
-export async function fileToDataUrl(file, maxSide = 800, quality = 0.62) {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close?.();
-  return canvas.toDataURL("image/jpeg", quality);
-}
-
-/** Shrink an existing data URL (e.g. camera snap) before sending to the API */
-export async function shrinkDataUrl(dataUrl, maxSide = 800, quality = 0.62, force = false) {
-  if (!dataUrl || !dataUrl.startsWith("data:image")) return dataUrl;
-  // Skip only if already small unless force (always compress for identify)
-  if (!force && dataUrl.length < 450_000) return dataUrl;
-  const img = await new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = dataUrl;
-  });
-  const scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
-  const w = Math.max(1, Math.round((img.width || 1) * scale));
-  const h = Math.max(1, Math.round((img.height || 1) * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-  return canvas.toDataURL("image/jpeg", quality);
 }
 
 /**
@@ -111,7 +58,7 @@ export async function shrinkDataUrl(dataUrl, maxSide = 800, quality = 0.62, forc
  *   foundOutside?: boolean,
  *   location?: object | null,
  *   maxRetries?: number,
- *   onProgress?: (p: { stage: string, message: string, attempt?: number, maxRetries?: number, pct?: number }) => void
+ *   onProgress?: (p: object) => void
  * }} [opts]
  */
 export async function identifyRock(dataUrl, opts = {}) {
@@ -128,11 +75,7 @@ export async function identifyRock(dataUrl, opts = {}) {
         }
       : null;
 
-  onProgress({
-    stage: "compress",
-    message: "Compressing photo for weak signal…",
-    pct: 8,
-  });
+  onProgress({ stage: "compress", message: "Compressing photo for weak signal…", pct: 8 });
 
   let image;
   try {
@@ -147,15 +90,13 @@ export async function identifyRock(dataUrl, opts = {}) {
     onProgress({
       stage: attempt === 1 ? "upload" : "retry",
       message:
-        attempt === 1
-          ? "Uploading photo…"
-          : `Weak signal — retry ${attempt} of ${maxRetries}…`,
+        attempt === 1 ? "Uploading photo…" : `Weak signal — retry ${attempt} of ${maxRetries}…`,
       attempt,
       maxRetries,
       pct: basePct,
     });
 
-    let stillTimer = setTimeout(() => {
+    const stillTimer = setTimeout(() => {
       onProgress({
         stage: "waiting",
         message: "Still working… hang tight!",
@@ -165,7 +106,7 @@ export async function identifyRock(dataUrl, opts = {}) {
       });
     }, 3500);
 
-    let studyingTimer = setTimeout(() => {
+    const studyingTimer = setTimeout(() => {
       onProgress({
         stage: "identify",
         message: "Studying your rock…",
@@ -185,24 +126,21 @@ export async function identifyRock(dataUrl, opts = {}) {
       clearTimeout(stillTimer);
       clearTimeout(studyingTimer);
       lastErr = e;
-      if (!isRetryableError(e) || attempt >= maxRetries) {
-        throw e;
-      }
+      if (!isRetryableError(e) || attempt >= maxRetries) throw e;
       onProgress({
         stage: "retry",
-        message: `Connection glitch — trying again…`,
+        message: "Connection glitch — trying again…",
         attempt,
         maxRetries,
         pct: basePct + 10,
       });
-      // Aggressive recompress for next try
       try {
         image = await compressForUpload(dataUrl, {
           maxSide: attempt === 1 ? 720 : 640,
           quality: attempt === 1 ? 0.55 : 0.48,
         });
       } catch {
-        /* keep previous image */
+        /* keep */
       }
       await sleep(700 * attempt);
     }
@@ -220,11 +158,7 @@ async function identifyRockOnce(image, { foundOutside, location }) {
     res = await fetch("/api/identify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image,
-        foundOutside,
-        location,
-      }),
+      body: JSON.stringify({ image, foundOutside, location }),
       signal: controller?.signal,
     });
   } catch (e) {
@@ -234,9 +168,7 @@ async function identifyRockOnce(image, { foundOutside, location }) {
       err.code = "timeout";
       throw err;
     }
-    const err = new Error(
-      "No connection — Save for later, or try again when signal is better."
-    );
+    const err = new Error("No connection — Save for later, or try again when signal is better.");
     err.code = "offline";
     throw err;
   }
@@ -258,7 +190,7 @@ async function identifyRockOnce(image, { foundOutside, location }) {
   if (!res.ok) {
     const detail = data.error || data.hint || `Identify failed (${res.status})`;
     const err = new Error(detail);
-    err.code = res.status >= 500 ? "api_error" : "api_error";
+    err.code = "api_error";
     err.status = res.status;
     err.detail = data;
     throw err;
@@ -275,6 +207,48 @@ async function identifyRockOnce(image, { foundOutside, location }) {
     mode: "live",
     model: data.model || null,
   });
+}
+
+/**
+ * Strict photo-challenge check — must show the target subject, not just be near the place.
+ */
+export async function verifyChallengePhoto(dataUrl, { verifyTarget, placeName } = {}) {
+  let image = dataUrl;
+  try {
+    image = await compressForUpload(dataUrl, { maxSide: 720, quality: 0.6 });
+  } catch {
+    /* */
+  }
+
+  let res;
+  try {
+    res = await fetch("/api/verify-challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image,
+        target: verifyTarget,
+        placeName: placeName || "",
+      }),
+    });
+  } catch {
+    const err = new Error("No connection to verify the photo challenge.");
+    err.code = "offline";
+    throw err;
+  }
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || "Challenge photo check failed");
+    err.code = data.needsKey ? "needs_key" : "api_error";
+    throw err;
+  }
+  return {
+    match: !!data.match,
+    confidence: Number(data.confidence) || 0,
+    seen: data.seen || "",
+    reason: data.reason || "",
+  };
 }
 
 export async function saveApiKey(key) {
@@ -294,9 +268,7 @@ function normalizeResult(raw, meta = {}) {
     const name = c.name || "Unknown rock";
     let rockId = normalizeRockId(c.rockId || name);
     const cat = catalogById(rockId);
-    if (!cat && name) {
-      rockId = normalizeRockId(name);
-    }
+    if (!cat && name) rockId = normalizeRockId(name);
     const rarity = normalizeRarity(c.rarity || cat?.rarity || "common");
     const confidence = clamp01(c.confidence);
     const fieldTests = normalizeFieldTests(c.fieldTests, rockId, name);

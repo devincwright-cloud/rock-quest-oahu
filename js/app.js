@@ -32,6 +32,7 @@ import {
   getVisionStatus,
   identifyRock,
   saveApiKey,
+  verifyChallengePhoto,
 } from "./identify.js";
 import {
   evaluateBadges,
@@ -52,17 +53,31 @@ import {
   getNearbyChallengeSpots,
   getPhotoChallenge,
   getPosition,
+  watchPosition,
+  clearWatch,
   PUBLIC_SPOTS,
   SPOTS_PAGE_SIZE,
   suggestRocks,
   suggestSpots,
 } from "./explore.js";
+import {
+  loadLastLocation,
+  openCameraStream,
+  applyZoom,
+  getZoomRange,
+  wasLocationGrantedBefore,
+  markCameraGranted,
+  queryPermission,
+} from "./permissions.js";
+import { shareOrSavePhoto } from "./share.js";
 import { formatCoords, osmEmbedUrl, osmLink, reverseGeocode } from "./geo.js";
 import { adjustedConfidence, formatAnswer, testsComplete } from "./fieldtests.js";
 import { rarityBadge, setActiveNav, showModal, sparkleBurst, toast, conf, $ } from "./ui.js";
 import { rarityStars } from "./data/catalog.js";
 import { BADGES, LEVELS, XP_REWARDS } from "./data/badges-data.js";
 import { getBadgesEarned } from "./store.js";
+
+const ADV_SESSION_KEY = "rq_oahu_active_adventure";
 
 const state = {
   route: "home",
@@ -85,18 +100,73 @@ const state = {
   outdoorLocation: null,
   /** Explore: open adventure album id, or null for album list */
   adventureAlbumId: null,
+  /** Sticky “still on this outing” even when browsing place list */
+  activeAdventureId: null,
+  activeAdventureTitle: "",
   /** Explore: adventure camera overlay open (phone-first snap flow) */
   adventureCamOpen: false,
   /** Spot id when camera opened for a location photo challenge */
   challengeSpotId: null,
+  /** Camera: environment = rear, user = selfie */
+  facingMode: "environment",
+  zoom: 1,
+  watchId: null,
 };
 
 const app = $("#app");
 
+function persistActiveAdventure() {
+  try {
+    if (state.activeAdventureId) {
+      sessionStorage.setItem(
+        ADV_SESSION_KEY,
+        JSON.stringify({
+          id: state.activeAdventureId,
+          title: state.activeAdventureTitle || "",
+          at: Date.now(),
+        })
+      );
+    } else {
+      sessionStorage.removeItem(ADV_SESSION_KEY);
+    }
+  } catch {
+    /* */
+  }
+}
+
+function restoreActiveAdventure() {
+  try {
+    const raw = sessionStorage.getItem(ADV_SESSION_KEY);
+    if (!raw) return;
+    const o = JSON.parse(raw);
+    // Keep adventure context for a long outing day (12h)
+    if (!o?.id || Date.now() - (o.at || 0) > 12 * 60 * 60 * 1000) return;
+    state.activeAdventureId = o.id;
+    state.activeAdventureTitle = o.title || "";
+  } catch {
+    /* */
+  }
+}
+
+function setActiveAdventure(album) {
+  if (!album?.id) return;
+  state.activeAdventureId = album.id;
+  state.activeAdventureTitle = album.title || "Today’s adventure";
+  state.adventureAlbumId = album.id;
+  persistActiveAdventure();
+}
+
+function clearActiveAdventure() {
+  state.activeAdventureId = null;
+  state.activeAdventureTitle = "";
+  persistActiveAdventure();
+}
+
 function navigate(route) {
   state.route = route;
   setActiveNav(route);
-  closeAdventureCamera();
+  // Keep adventure context when switching tabs — only close live camera
+  closeAdventureCamera({ clearChallenge: true });
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -117,6 +187,10 @@ function closeAdventureCamera({ clearChallenge = true } = {}) {
 function openAdventureCamera({ challengeSpotId = null } = {}) {
   state.challengeSpotId = challengeSpotId;
   state.adventureCamOpen = true;
+  // Prefer rear for scenery / challenges; selfie still available via flip
+  if (!challengeSpotId && state.facingMode !== "user") {
+    state.facingMode = "environment";
+  }
   stopCamera();
 }
 
@@ -128,6 +202,25 @@ function bindAdventureCameraControls() {
   $("#btn-adv-cam-cancel")?.addEventListener("click", async () => {
     closeAdventureCamera();
     await render();
+  });
+
+  $("#btn-adv-flip")?.addEventListener("click", async () => {
+    state.facingMode = state.facingMode === "user" ? "environment" : "user";
+    state.zoom = 1;
+    await startAdventureCamera();
+  });
+  $("#btn-adv-zoom-out")?.addEventListener("click", async () => {
+    state.zoom = Math.max(1, (state.zoom || 1) - 0.5);
+    await applyZoom(state.stream, state.zoom);
+    updateZoomLabel();
+  });
+  $("#btn-adv-zoom-in")?.addEventListener("click", async () => {
+    state.zoom = Math.min(8, (state.zoom || 1) + 0.5);
+    const r = await applyZoom(state.stream, state.zoom);
+    if (!r.ok && r.reason === "unsupported") {
+      toast("Zoom isn’t available on this camera — move closer!", "info");
+    }
+    updateZoomLabel();
   });
 
   $("#btn-adv-snap")?.addEventListener("click", async () => {
@@ -179,8 +272,11 @@ async function render({ preserveScroll = false } = {}) {
   }
   try {
     if (!state.visionStatus) state.visionStatus = await getVisionStatus();
-    app.innerHTML = await fn();
+    const body = await fn();
+    app.innerHTML = `${renderStickyAdventureBar()}${body}`;
     bindScreen();
+    bindStickyAdventureBar();
+    ensureLocationWatch();
     if (preserveScroll) {
       requestAnimationFrame(() => window.scrollTo(0, scrollY));
     }
@@ -188,6 +284,41 @@ async function render({ preserveScroll = false } = {}) {
     console.error(e);
     app.innerHTML = `<div class="screen"><div class="card"><h2>Oops!</h2><p>${escapeHtml(e.message)}</p><button class="btn btn-primary" data-go="home">Home</button></div></div>`;
     bindScreen();
+  }
+}
+
+/** Keep GPS warm while exploring / on adventure (fewer “lost trail” drops). */
+function ensureLocationWatch() {
+  if (state.watchId != null) return;
+  if (!wasLocationGrantedBefore() && !state.location) return;
+  state.watchId = watchPosition(
+    (loc) => {
+      state.location = loc;
+      // Soft refresh of near-challenge UI not forced every tick (battery)
+    },
+    () => {
+      /* ignore watch errors; one-shot still works */
+    }
+  );
+}
+
+async function bootstrapLocation() {
+  restoreActiveAdventure();
+  const cached = loadLastLocation();
+  if (cached) state.location = cached;
+  const perm = await queryPermission("geolocation");
+  if (perm === "granted" || wasLocationGrantedBefore()) {
+    try {
+      state.location = await getPosition({
+        timeout: 12000,
+        maximumAge: 30_000,
+        highAccuracy: true,
+        allowCached: true,
+      });
+      ensureLocationWatch();
+    } catch {
+      /* user may have denied later */
+    }
   }
 }
 
@@ -335,12 +466,24 @@ async function renderIdentify() {
           }
           <div class="new-sparkle-banner hidden" id="new-banner">✨ NEW in your Dex!</div>
         </div>
+        ${
+          !hasPhoto
+            ? `<div class="cam-toolbar">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-id-flip">${
+                  state.facingMode === "user" ? "🤳 Selfie" : "📷 Rear"
+                } · flip</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-id-zoom-out">− Zoom</button>
+                <span class="zoom-label" id="id-zoom-label">${(state.zoom || 1).toFixed(1)}×</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-id-zoom-in">Zoom +</button>
+              </div>`
+            : ""
+        }
         <div class="camera-actions">
           <button class="btn btn-secondary" type="button" id="btn-start-cam">Open camera</button>
           <button class="btn btn-secondary" type="button" id="btn-snap" ${hasPhoto ? "" : "disabled"}>Snap</button>
           <label class="btn btn-secondary file-btn">
             Gallery
-            <input type="file" id="file-input" accept="image/*" capture="environment" hidden />
+            <input type="file" id="file-input" accept="image/*" hidden />
           </label>
         </div>
         <label class="check-row outdoor-id-check">
@@ -352,7 +495,10 @@ async function renderIdentify() {
         </button>
         ${
           hasPhoto
-            ? `<button class="btn btn-secondary btn-full" type="button" id="btn-save-later" style="margin-top:0.5rem">
+            ? `<button class="btn btn-secondary btn-full" type="button" id="btn-share-id-photo" style="margin-top:0.5rem">
+                📤 Save / Share photo
+              </button>
+              <button class="btn btn-secondary btn-full" type="button" id="btn-save-later" style="margin-top:0.5rem">
                 📦 Save for later (weak signal)
               </button>
               <button class="btn btn-ghost btn-full" id="btn-clear-photo" type="button">Clear photo</button>`
@@ -865,7 +1011,10 @@ function renderAdventureAlbumDetail(album) {
                   <img src="${p.dataUrl}" alt="" />
                   <figcaption>
                     ${p.placeLabel ? `<strong>${escapeHtml(p.placeLabel)}</strong>` : ""}
-                    <button type="button" class="btn-ghost-sm btn-del-photo" data-del-adv="${p.id}">🗑️ Delete photo</button>
+                    <div class="adv-photo-actions">
+                      <button type="button" class="btn btn-secondary btn-sm" data-share-adv="${p.id}">📤 Save / Share</button>
+                      <button type="button" class="btn-ghost-sm btn-del-photo" data-del-adv="${p.id}">🗑️ Delete</button>
+                    </div>
                   </figcaption>
                 </figure>`
                 )
@@ -873,6 +1022,9 @@ function renderAdventureAlbumDetail(album) {
             </div>`
           : `<div class="empty-card"><p>No photos in this album yet.</p></div>`
       }
+      <button type="button" class="btn btn-primary btn-full" id="btn-adv-photo-again" style="margin-top:0.75rem">
+        📸 Keep adding photos to this adventure
+      </button>
       <div class="card album-danger-zone">
         <p class="muted small">Want a clean slate for this outing?</p>
         <button type="button" class="btn btn-ghost btn-full btn-delete-danger" id="btn-del-album">
@@ -902,6 +1054,7 @@ function renderAdventureCameraOverlay() {
       challengeHint = ch.prompt || challengeHint;
     }
   }
+  const faceLabel = state.facingMode === "user" ? "🤳 Selfie" : "📷 Rear";
   return `
     <div class="adv-cam-overlay" id="adv-cam-overlay" role="dialog" aria-label="Take adventure photo">
       <div class="adv-cam-sheet">
@@ -911,23 +1064,79 @@ function renderAdventureCameraOverlay() {
         </header>
         ${
           state.challengeSpotId
-            ? `<p class="adv-cam-challenge-prompt">${escapeHtml(challengeHint)}</p>`
+            ? `<p class="adv-cam-challenge-prompt">${escapeHtml(challengeHint)}
+                <br/><span class="muted small">Must show the real target — scenery alone won’t unlock!</span></p>`
             : ""
         }
         <div class="adv-cam-viewfinder">
           <video id="adv-cam-video" playsinline autoplay muted></video>
           <div class="adv-cam-hint">${escapeHtml(challengeHint)}</div>
         </div>
+        <div class="cam-toolbar">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-adv-flip">${faceLabel} · flip</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-adv-zoom-out">− Zoom</button>
+          <span class="zoom-label" id="adv-zoom-label">${(state.zoom || 1).toFixed(1)}×</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-adv-zoom-in">Zoom +</button>
+        </div>
         <div class="adv-cam-actions">
           <button type="button" class="btn btn-primary btn-xl btn-full" id="btn-adv-snap">📷 Snap photo!</button>
           <label class="btn btn-secondary btn-full file-btn">
             🖼️ From gallery instead
-            <input type="file" id="adv-photo-input" accept="image/*" capture="environment" hidden />
+            <input type="file" id="adv-photo-input" accept="image/*" hidden />
           </label>
           <button type="button" class="btn btn-ghost btn-full" id="btn-adv-cam-cancel">Cancel</button>
         </div>
       </div>
     </div>`;
+}
+
+function updateZoomLabel() {
+  const el = $("#adv-zoom-label") || $("#id-zoom-label");
+  if (el) el.textContent = `${(state.zoom || 1).toFixed(1)}×`;
+}
+
+function renderStickyAdventureBar() {
+  if (!state.activeAdventureId) return "";
+  // Hide when already viewing that album
+  if (state.route === "explore" && state.adventureAlbumId === state.activeAdventureId && !state.adventureCamOpen) {
+    /* still show compact bar so they can add photos */
+  }
+  const title = state.activeAdventureTitle || "Today’s adventure";
+  return `
+    <div class="sticky-adventure-bar" role="region" aria-label="Active adventure">
+      <div class="sticky-adventure-info">
+        <strong>🗺️ On adventure</strong>
+        <span>${escapeHtml(title)}</span>
+      </div>
+      <div class="sticky-adventure-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-sticky-add-photo">📸 Add photo</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-sticky-open-album">Album</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-sticky-end" title="End adventure mode">End</button>
+      </div>
+    </div>`;
+}
+
+function bindStickyAdventureBar() {
+  $("#btn-sticky-add-photo")?.addEventListener("click", async () => {
+    if (state.activeAdventureId) state.adventureAlbumId = state.activeAdventureId;
+    state.route = "explore";
+    setActiveNav("explore");
+    openAdventureCamera({ challengeSpotId: null });
+    await render();
+  });
+  $("#btn-sticky-open-album")?.addEventListener("click", async () => {
+    if (!state.activeAdventureId) return;
+    state.adventureAlbumId = state.activeAdventureId;
+    state.route = "explore";
+    setActiveNav("explore");
+    closeAdventureCamera();
+    await render();
+  });
+  $("#btn-sticky-end")?.addEventListener("click", async () => {
+    clearActiveAdventure();
+    toast("Adventure mode ended — albums are still saved!", "info");
+    await render();
+  });
 }
 
 async function renderPath() {
@@ -1022,27 +1231,70 @@ function bindHome() {
 
 function bindIdentify() {
   const fileInput = $("#file-input");
+
+  async function startIdCamera() {
+    stopCamera();
+    state.photoDataUrl = null;
+    state.lastResult = null;
+    // Keep facing/zoom; re-render viewfinder
+    const stream = await openCameraStream({
+      facingMode: state.facingMode || "environment",
+      zoom: state.zoom || 1,
+    });
+    state.stream = stream;
+    await render({ preserveScroll: true });
+    const v = $("#cam-video");
+    if (v) {
+      v.srcObject = stream;
+      await v.play();
+    }
+    const snap = $("#btn-snap");
+    if (snap) snap.disabled = false;
+    updateZoomLabel();
+    markCameraGranted();
+  }
+
   $("#btn-start-cam")?.addEventListener("click", async () => {
     try {
-      stopCamera();
-      state.photoDataUrl = null;
-      state.lastResult = null;
-      await render();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      });
-      state.stream = stream;
-      const v = $("#cam-video");
-      if (v) {
-        v.srcObject = stream;
-        await v.play();
-      }
-      const snap = $("#btn-snap");
-      if (snap) snap.disabled = false;
+      await startIdCamera();
       toast("Camera ready!", "success");
     } catch {
       toast("Camera blocked — try Gallery upload instead.", "error");
+    }
+  });
+
+  $("#btn-id-flip")?.addEventListener("click", async () => {
+    state.facingMode = state.facingMode === "user" ? "environment" : "user";
+    state.zoom = 1;
+    try {
+      await startIdCamera();
+    } catch {
+      toast("Could not switch camera", "error");
+    }
+  });
+  $("#btn-id-zoom-out")?.addEventListener("click", async () => {
+    state.zoom = Math.max(1, (state.zoom || 1) - 0.5);
+    const r = await applyZoom(state.stream, state.zoom);
+    if (!r.ok && r.reason === "unsupported") toast("Zoom not available — move closer!", "info");
+    updateZoomLabel();
+  });
+  $("#btn-id-zoom-in")?.addEventListener("click", async () => {
+    state.zoom = Math.min(8, (state.zoom || 1) + 0.5);
+    const r = await applyZoom(state.stream, state.zoom);
+    if (!r.ok && r.reason === "unsupported") toast("Zoom not available — move closer!", "info");
+    updateZoomLabel();
+  });
+
+  $("#btn-share-id-photo")?.addEventListener("click", async () => {
+    if (!state.photoDataUrl) return;
+    try {
+      const how = await shareOrSavePhoto(state.photoDataUrl, {
+        title: "Rock Quest Oahu photo",
+        filename: `rock-quest-${Date.now()}.jpg`,
+      });
+      if (how !== "cancelled") toast("Use Share → Save Image to keep it in Photos!", "success");
+    } catch (e) {
+      toast(e.message || "Could not share photo", "error");
     }
   });
 
@@ -1568,6 +1820,13 @@ async function openFindDetail(id, { editTests = false } = {}) {
         <button class="btn btn-secondary" data-close type="button">Close</button>
         <button class="btn btn-primary" id="save-find" type="button">Save changes</button>
       </div>
+      ${
+        f.photoDataUrl
+          ? `<button type="button" class="btn btn-secondary btn-full" id="btn-share-find" style="margin-top:0.65rem">
+              📤 Save / Share photo to phone
+            </button>`
+          : ""
+      }
       <button type="button" class="btn btn-ghost btn-full btn-delete-danger" id="btn-delete-find">
         🗑️ Delete this rock from my Dex
       </button>
@@ -1625,6 +1884,19 @@ async function openFindDetail(id, { editTests = false } = {}) {
     await render();
   });
 
+  $("#btn-share-find")?.addEventListener("click", async () => {
+    if (!f.photoDataUrl) return;
+    try {
+      const how = await shareOrSavePhoto(f.photoDataUrl, {
+        title: f.nickname || f.name || "Rock Quest Oahu",
+        filename: `rock-dex-${(f.name || "rock").replace(/\s+/g, "-")}-${Date.now()}.jpg`,
+      });
+      if (how !== "cancelled") toast("Shared — pick Save Image / Photos to keep it!", "success");
+    } catch (e) {
+      toast(e.message || "Could not share", "error");
+    }
+  });
+
   $("#btn-delete-find")?.addEventListener("click", async () => {
     const label = f.nickname || f.name || "this rock";
     const ok = window.confirm(
@@ -1638,27 +1910,29 @@ async function openFindDetail(id, { editTests = false } = {}) {
   });
 }
 
-/** Open rear-facing camera for adventure album snaps. */
+/** Open camera for adventure album snaps (rear or selfie + zoom). */
 async function startAdventureCamera() {
   const v = $("#adv-cam-video");
   if (!v) return;
   try {
     stopCamera();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-      audio: false,
+    const stream = await openCameraStream({
+      facingMode: state.facingMode || "environment",
+      zoom: state.zoom || 1,
     });
     state.stream = stream;
     v.srcObject = stream;
     await v.play();
-    toast("Camera ready — snap the adventure!", "success");
+    const zr = getZoomRange(stream);
+    if (zr.supported) state.zoom = zr.current || state.zoom || 1;
+    updateZoomLabel();
+    markCameraGranted();
+    toast(
+      state.facingMode === "user" ? "Selfie camera ready!" : "Camera ready — snap the adventure!",
+      "success"
+    );
   } catch (err) {
     console.warn("Adventure camera failed", err);
-    // Keep overlay open so kids can use gallery fallback
     toast("Camera needs permission — or pick From gallery.", "error");
   }
 }
@@ -1706,16 +1980,19 @@ async function saveAdventurePhotoFromDataUrl(dataUrl) {
   state.adventureAlbumId = album?.id || state.adventureAlbumId;
   await grantAdventurePhotoXp();
 
-  // Complete location photo challenge if on-site (or explicitly started from challenge CTA)
+  // Only unlock challenges when this snap was for that challenge + vision match
   const challengeResult = await maybeCompletePhotoChallenge({
     preferredSpotId: challengeId,
     lat,
     lng,
+    dataUrl: compressed,
   });
+
+  if (album) setActiveAdventure(album);
 
   if (challengeResult?.isNew) {
     toast(`🎯 Challenge complete! +XP · Saved to “${album?.title || "Adventure"}”`, "success");
-  } else {
+  } else if (!challengeResult?.rejected) {
     toast(`Saved to “${album?.title || "Adventure"}” 📸`, "success");
   }
   sparkleBurst(document.body);
@@ -1725,48 +2002,76 @@ async function saveAdventurePhotoFromDataUrl(dataUrl) {
 }
 
 /**
- * If user is near a spot (or targeted a challenge), mark challenge complete + XP once.
+ * Complete a photo challenge only when:
+ * 1) User explicitly snapped for that challenge (preferredSpotId), AND
+ * 2) GPS is near the place, AND
+ * 3) Vision confirms the photo shows the required subject (not random trail scenery).
  */
-async function maybeCompletePhotoChallenge({ preferredSpotId = null, lat = null, lng = null } = {}) {
+async function maybeCompletePhotoChallenge({
+  preferredSpotId = null,
+  lat = null,
+  lng = null,
+  dataUrl = null,
+} = {}) {
+  // Never auto-complete from a random adventure photo near a spot
+  if (!preferredSpotId) return { isNew: false, skipped: true };
+
   const loc =
     lat != null && lng != null
-      ? { lat, lng }
+      ? { lat, lng, accuracy: state.location?.accuracy }
       : state.location;
-  if (!loc) return null;
+  if (!loc) {
+    toast("Photo saved! Turn on location near the place to unlock the challenge.", "info");
+    return { isNew: false };
+  }
 
   const completedMap = await getPhotoChallengesCompleted();
-  const completedIds = new Set(Object.keys(completedMap));
-  const near = getNearbyChallengeSpots(loc, { completedIds });
+  if (completedMap[preferredSpotId]) return { isNew: false };
 
-  let target = preferredSpotId
-    ? near.find((s) => s.id === preferredSpotId) || findSpotById(preferredSpotId)
-    : null;
+  const target = findSpotById(preferredSpotId);
+  if (!target) return { isNew: false };
 
-  // If preferred spot isn't near, only complete when GPS says we're close
-  if (preferredSpotId && target) {
-    const d =
-      target.distanceKm != null
-        ? target.distanceKm
-        : target.lat != null
-          ? // recompute via near list only
-            near.find((s) => s.id === preferredSpotId)?.distanceKm
-          : null;
-    if (d == null || !near.some((s) => s.id === preferredSpotId)) {
-      // Explicit challenge CTA but not near — still save photo, no challenge XP
-      toast("Photo saved! Get closer to the place to finish the challenge.", "info");
-      return { isNew: false };
-    }
+  const near = getNearbyChallengeSpots(loc, {
+    completedIds: new Set(Object.keys(completedMap)),
+  });
+  if (!near.some((s) => s.id === preferredSpotId)) {
+    toast("Photo saved! Get closer to the place to finish the challenge.", "info");
+    return { isNew: false };
   }
-
-  if (!target) {
-    target = near.find((s) => !s.challengeDone) || null;
-  }
-  if (!target || completedIds.has(target.id)) return { isNew: false };
-
-  // Must be within challenge radius
-  if (!near.some((s) => s.id === target.id)) return { isNew: false };
 
   const ch = getPhotoChallenge(target);
+  if (!dataUrl) {
+    toast("Photo saved — open the challenge again and snap the real target to unlock XP.", "info");
+    return { isNew: false };
+  }
+
+  try {
+    toast("Checking if this photo shows the real target…", "info");
+    const verify = await verifyChallengePhoto(dataUrl, {
+      verifyTarget: ch.verifyTarget || ch.prompt,
+      placeName: target.name,
+    });
+    if (!verify.match) {
+      toast(
+        verify.reason ||
+          "Nice photo — but it doesn’t clearly show the challenge target. Try again!",
+        "error"
+      );
+      return { isNew: false, rejected: true, reason: verify.reason };
+    }
+  } catch (e) {
+    if (e.code === "needs_key") {
+      toast("Challenge photo check needs vision key — photo still saved.", "info");
+      return { isNew: false };
+    }
+    // Offline: do not unlock (strict)
+    toast(
+      e.message || "Couldn’t verify challenge (need signal). Photo saved — try unlock again later.",
+      "error"
+    );
+    return { isNew: false };
+  }
+
   const { isNew } = await completePhotoChallenge({
     spotId: target.id,
     name: target.name,
@@ -1783,9 +2088,20 @@ async function maybeCompletePhotoChallenge({ preferredSpotId = null, lat = null,
 function bindExplore() {
   $("#btn-locate")?.addEventListener("click", async () => {
     try {
-      state.location = await getPosition();
+      state.location = await getPosition({
+        timeout: 20000,
+        maximumAge: 5_000,
+        highAccuracy: true,
+        allowCached: false,
+      });
       state.spotShowCount = SPOTS_PAGE_SIZE;
-      toast("Location locked in!", "success");
+      ensureLocationWatch();
+      toast(
+        state.location?.stale
+          ? "Using last known location — walk a few steps and refresh"
+          : "Location locked in!",
+        "success"
+      );
       await render();
     } catch {
       toast("Couldn't get location. You can still browse general tips!", "error");
@@ -1830,8 +2146,42 @@ function bindExplore() {
   app.querySelectorAll("[data-open-album]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       state.adventureAlbumId = btn.dataset.openAlbum;
+      const alb = await getAdventureAlbum(btn.dataset.openAlbum);
+      if (alb) setActiveAdventure(alb);
       closeAdventureCamera();
       await render();
+    });
+  });
+
+  $("#btn-adv-photo-again")?.addEventListener("click", async () => {
+    if (state.adventureAlbumId) {
+      const alb = await getAdventureAlbum(state.adventureAlbumId);
+      if (alb) setActiveAdventure(alb);
+    }
+    openAdventureCamera({ challengeSpotId: null });
+    await render();
+  });
+
+  app.querySelectorAll("[data-share-adv]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const photoId = btn.dataset.shareAdv;
+      const alb = state.adventureAlbumId
+        ? await getAdventureAlbum(state.adventureAlbumId)
+        : null;
+      const photo = (alb?.photos || []).find((p) => p.id === photoId);
+      if (!photo?.dataUrl) {
+        toast("Photo not found", "error");
+        return;
+      }
+      try {
+        const how = await shareOrSavePhoto(photo.dataUrl, {
+          title: alb?.title || "Adventure photo",
+          filename: `adventure-${Date.now()}.jpg`,
+        });
+        if (how !== "cancelled") toast("Shared — Save Image to put it in Photos!", "success");
+      } catch (e) {
+        toast(e.message || "Could not share", "error");
+      }
     });
   });
 
@@ -1922,7 +2272,13 @@ function bindExplore() {
         lng: btn.dataset.lng ? Number(btn.dataset.lng) : null,
       };
       try {
-        state.location = await getPosition(8000);
+        // Fresh high-accuracy fix for check-in (don't use stale 60s cache)
+        state.location = await getPosition({
+          timeout: 20000,
+          maximumAge: 0,
+          highAccuracy: true,
+          allowCached: true,
+        });
       } catch {
         /* keep previous */
       }
@@ -1971,4 +2327,5 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-navigate("home");
+// Restore adventure session + location if already permitted (no re-prompt loop)
+bootstrapLocation().finally(() => navigate("home"));
