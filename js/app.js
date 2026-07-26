@@ -174,6 +174,10 @@ function navigate(route) {
   setActiveNav(route);
   // Keep adventure context when switching tabs — only close live camera
   closeAdventureCamera({ clearChallenge: true });
+  // If a full-screen photo is open, close it cleanly (restores safe-area)
+  if (state.photoViewer) {
+    closePhotoViewer();
+  }
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
