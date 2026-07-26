@@ -28,6 +28,11 @@
   --font: "Nunito", system-ui, sans-serif;
   --display: "Fredoka", "Nunito", system-ui, sans-serif;
   --nav-h: 72px;
+  /* iOS 11.0–11.2 used constant(); env() is current. Keep both. */
+  --safe-t: 0px;
+  --safe-b: 0px;
+  --safe-t: constant(safe-area-inset-top);
+  --safe-b: constant(safe-area-inset-bottom);
   --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
   /* Subtle geometric / tribal-inspired tile (diamonds + chevrons) */
@@ -37,14 +42,18 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html, body {
+html {
   min-height: 100%;
+  /* Prevent iOS from shifting layout after fixed overlays */
+  height: 100%;
+}
+
+html, body {
   background:
     var(--geo-pattern),
     radial-gradient(ellipse 90% 50% at 10% -10%, rgba(255, 214, 10, 0.1), transparent 50%),
     radial-gradient(ellipse 70% 40% at 100% 0%, rgba(30, 90, 160, 0.35), transparent 45%),
     linear-gradient(180deg, var(--bg1), var(--bg0));
-  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--font);
   font-size: 16px;
@@ -52,26 +61,53 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-body { min-height: 100dvh; }
+/*
+ * Permanent safe-area padding on body so content NEVER sits under the
+ * notch/Dynamic Island — even if iOS glitches after full-screen overlays.
+ */
+body {
+  min-height: 100%;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  padding-top: var(--safe-t);
+  padding-bottom: 0;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  /* background fills the status bar area under the padding */
+  background-attachment: fixed;
+}
+
+/* Full-screen photo viewer: freeze page scroll without losing safe-area */
+html.photo-viewer-open,
+html.photo-viewer-open body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+html.photo-viewer-open body {
+  /* position:fixed + top offset applied in JS to preserve scroll */
+  width: 100%;
+  left: 0;
+  right: 0;
+}
 
 button, input, textarea { font: inherit; color: inherit; }
 img { max-width: 100%; display: block; }
 a { color: var(--primary); }
 
 .app-shell {
-  min-height: 100dvh;
+  min-height: calc(100dvh - var(--safe-t));
+  min-height: calc(-webkit-fill-available - var(--safe-t));
   max-width: 520px;
   margin: 0 auto;
   position: relative;
   padding-bottom: calc(var(--nav-h) + var(--safe-b) + 12px);
+  /* body already handles top safe-area — don't double-pad */
 }
 
-/* Keep content below notch / Dynamic Island and above home indicator */
+/* Content spacing only (safe-area is on body) */
 .app-main {
-  padding:
-    max(0.85rem, calc(var(--safe-t) + 0.55rem))
-    1rem
-    1.5rem;
+  padding: 0.85rem 1rem 1.5rem;
 }
 .screen-header {
   padding-top: 0.15rem;
@@ -496,7 +532,7 @@ h1, h2, h3 {
     linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.45), transparent);
 }
 
-/* Sticky adventure mode bar — below safe area / notch */
+/* Sticky adventure mode bar — sticks below body safe-area padding */
 .sticky-adventure-bar {
   position: sticky;
   top: 0;
@@ -573,25 +609,41 @@ h1, h2, h3 {
   pointer-events: none;
 }
 
-/* Full-screen photo viewer */
+/* Full-screen photo viewer — covers status bar; controls use safe insets */
 .photo-viewer {
   position: fixed;
-  inset: 0;
+  /* Use 0 relative to layout viewport; body padding is separate */
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
   z-index: 9500;
   background: rgba(4, 10, 20, 0.96);
   display: flex;
   flex-direction: column;
-  padding:
-    max(0.5rem, var(--safe-t))
-    0.65rem
-    max(0.65rem, var(--safe-b));
+  /* Viewer draws edge-to-edge; pad controls only */
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+html.photo-viewer-open .photo-viewer {
+  /* Sit flush with the true screen edges while open */
+  top: calc(-1 * var(--safe-t));
+  height: calc(100dvh + var(--safe-t));
+  min-height: calc(100% + var(--safe-t));
 }
 .photo-viewer-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.35rem 0.15rem 0.55rem;
+  padding:
+    max(0.5rem, calc(var(--safe-t) + 0.35rem))
+    0.75rem
+    0.55rem;
   flex-shrink: 0;
 }
 .photo-viewer-meta {
@@ -636,7 +688,9 @@ h1, h2, h3 {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  padding: 0.75rem 0.25rem 0.35rem;
+  padding:
+    0.75rem 0.65rem
+    max(0.65rem, calc(var(--safe-b) + 0.45rem));
   flex-shrink: 0;
 }
 .sticky-adventure-info {

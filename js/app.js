@@ -108,6 +108,8 @@ const state = {
   /** Full-screen photo viewer: { photos, index, title } | null */
   photoViewer: null,
   viewerZoom: 1,
+  /** Scroll Y saved when opening photo viewer (restore after close) */
+  photoViewerScrollY: 0,
   /** Explore: adventure camera overlay open (phone-first snap flow) */
   adventureCamOpen: false,
   /** Spot id when camera opened for a location photo challenge */
@@ -1120,7 +1122,51 @@ function renderPhotoViewer() {
     </div>`;
 }
 
+/**
+ * iOS often shifts the page under the status bar after a fixed full-screen
+ * overlay. Lock body while open; restore scroll + safe-area when closed.
+ */
+function lockScrollForPhotoViewer() {
+  const y = window.scrollY || window.pageYOffset || 0;
+  state.photoViewerScrollY = y;
+  document.documentElement.classList.add("photo-viewer-open");
+  document.body.classList.add("photo-viewer-open");
+  document.body.style.position = "fixed";
+  document.body.style.top = `-${y}px`;
+  document.body.style.left = "0";
+  document.body.style.right = "0";
+  document.body.style.width = "100%";
+}
+
+function unlockScrollAfterPhotoViewer() {
+  const y = state.photoViewerScrollY || 0;
+  document.documentElement.classList.remove("photo-viewer-open");
+  document.body.classList.remove("photo-viewer-open");
+  document.body.style.position = "";
+  document.body.style.top = "";
+  document.body.style.left = "";
+  document.body.style.right = "";
+  document.body.style.width = "";
+  // Restore scroll after layout is free of position:fixed
+  requestAnimationFrame(() => {
+    window.scrollTo(0, y);
+    // Second frame: force iOS to recompute safe-area after overlay removal
+    requestAnimationFrame(() => {
+      window.scrollTo(0, y);
+      // Nudge layout without visible jump (helps Dynamic Island / notch)
+      const shell = document.querySelector(".app-shell");
+      if (shell) {
+        shell.style.transform = "translateZ(0)";
+        // eslint-disable-next-line no-unused-expressions
+        shell.offsetHeight;
+        shell.style.transform = "";
+      }
+    });
+  });
+}
+
 function openPhotoViewer(photos, index, title) {
+  lockScrollForPhotoViewer();
   state.photoViewer = {
     photos: (photos || []).filter((p) => p?.dataUrl),
     index: index || 0,
@@ -1132,9 +1178,19 @@ function openPhotoViewer(photos, index, title) {
 function closePhotoViewer() {
   state.photoViewer = null;
   state.viewerZoom = 1;
+  unlockScrollAfterPhotoViewer();
 }
 
 function bindPhotoViewer() {
+  // Keep body lock in sync if we re-rendered while viewer is open
+  if (state.photoViewer) {
+    if (!document.body.classList.contains("photo-viewer-open")) {
+      lockScrollForPhotoViewer();
+    }
+  } else if (document.body.classList.contains("photo-viewer-open")) {
+    unlockScrollAfterPhotoViewer();
+  }
+
   if (!state.photoViewer) return;
 
   const setZoom = (z) => {
@@ -1145,22 +1201,29 @@ function bindPhotoViewer() {
     if (label) label.textContent = `${state.viewerZoom.toFixed(1)}×`;
   };
 
-  $("#btn-viewer-close")?.addEventListener("click", async () => {
+  const closeAndRender = async () => {
     closePhotoViewer();
-    await render({ preserveScroll: true });
-  });
+    // Do NOT preserveScroll here — unlockScrollAfterPhotoViewer restores it
+    await render({ preserveScroll: false });
+    // Re-apply saved scroll after render rewrote the DOM
+    const y = state.photoViewerScrollY || 0;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  };
+
+  $("#btn-viewer-close")?.addEventListener("click", () => closeAndRender());
   $("#btn-viewer-prev")?.addEventListener("click", async () => {
     if (!state.photoViewer || state.photoViewer.index <= 0) return;
     state.photoViewer.index -= 1;
     state.viewerZoom = 1;
-    await render({ preserveScroll: true });
+    // Stay locked; re-render overlay content only
+    await render({ preserveScroll: false });
   });
   $("#btn-viewer-next")?.addEventListener("click", async () => {
     if (!state.photoViewer) return;
     if (state.photoViewer.index >= state.photoViewer.photos.length - 1) return;
     state.photoViewer.index += 1;
     state.viewerZoom = 1;
-    await render({ preserveScroll: true });
+    await render({ preserveScroll: false });
   });
   $("#btn-viewer-zoom-in")?.addEventListener("click", () => setZoom((state.viewerZoom || 1) + 0.5));
   $("#btn-viewer-zoom-out")?.addEventListener("click", () => setZoom((state.viewerZoom || 1) - 0.5));
