@@ -28,6 +28,7 @@
   --font: "Nunito", system-ui, sans-serif;
   --display: "Fredoka", "Nunito", system-ui, sans-serif;
   --nav-h: 72px;
+  --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
   /* Subtle geometric / tribal-inspired tile (diamonds + chevrons) */
   --geo-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'%3E%3Cpath d='M24 4 L28 12 L24 20 L20 12 Z' fill='%23ffd60a' fill-opacity='0.07'/%3E%3Cpath d='M8 28 L12 32 L8 36 L4 32 Z' fill='%23ffd60a' fill-opacity='0.05'/%3E%3Cpath d='M40 28 L44 32 L40 36 L36 32 Z' fill='%23ffffff' fill-opacity='0.04'/%3E%3Cpath d='M16 40 L24 36 L32 40' fill='none' stroke='%23ffd60a' stroke-opacity='0.08' stroke-width='1.2'/%3E%3C/svg%3E");
@@ -65,7 +66,19 @@ a { color: var(--primary); }
   padding-bottom: calc(var(--nav-h) + var(--safe-b) + 12px);
 }
 
-.app-main { padding: 1rem 1rem 1.5rem; }
+/* Keep content below notch / Dynamic Island and above home indicator */
+.app-main {
+  padding:
+    max(0.85rem, calc(var(--safe-t) + 0.55rem))
+    1rem
+    1.5rem;
+}
+.screen-header {
+  padding-top: 0.15rem;
+}
+.screen-header .btn {
+  margin-top: 0.15rem;
+}
 
 .screen { animation: fadeUp 0.28s ease; }
 @keyframes fadeUp {
@@ -483,7 +496,7 @@ h1, h2, h3 {
     linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.45), transparent);
 }
 
-/* Sticky adventure mode bar */
+/* Sticky adventure mode bar — below safe area / notch */
 .sticky-adventure-bar {
   position: sticky;
   top: 0;
@@ -493,12 +506,138 @@ h1, h2, h3 {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  margin: -0.25rem 0 0.85rem;
+  margin: 0 0 0.85rem;
   padding: 0.65rem 0.75rem;
   border-radius: 14px;
   background: linear-gradient(135deg, rgba(20, 70, 120, 0.95), rgba(10, 35, 65, 0.98));
   border: 2px solid rgba(255, 214, 10, 0.4);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* Explore Places / Past adventures tabs */
+.explore-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 214, 10, 0.15);
+}
+.explore-tab {
+  border: none;
+  border-radius: 999px;
+  padding: 0.65rem 0.5rem;
+  font-weight: 900;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background: transparent;
+  color: var(--muted);
+}
+.explore-tab.on {
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: var(--navy-deep);
+  box-shadow: 0 4px 12px rgba(255, 214, 10, 0.25);
+}
+.past-adventures-card h3 { margin-bottom: 0.35rem; }
+.album-list-full { margin-top: 0.65rem; }
+
+/* Adventure photo open affordance */
+.adv-card-open {
+  display: block;
+  width: 100%;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  border-radius: 14px 14px 0 0;
+  overflow: hidden;
+}
+.adv-card-open img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+.adv-card-zoom-hint {
+  position: absolute;
+  left: 0.4rem;
+  bottom: 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+}
+
+/* Full-screen photo viewer */
+.photo-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(4, 10, 20, 0.96);
+  display: flex;
+  flex-direction: column;
+  padding:
+    max(0.5rem, var(--safe-t))
+    0.65rem
+    max(0.65rem, var(--safe-b));
+}
+.photo-viewer-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.15rem 0.55rem;
+  flex-shrink: 0;
+}
+.photo-viewer-meta {
+  display: grid;
+  text-align: center;
+  min-width: 0;
+  flex: 1;
+}
+.photo-viewer-meta strong {
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.photo-viewer-meta span {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+.photo-viewer-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #000;
+  touch-action: none;
+}
+.photo-viewer-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  transition: transform 0.12s ease-out;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.photo-viewer-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.75rem 0.25rem 0.35rem;
+  flex-shrink: 0;
 }
 .sticky-adventure-info {
   display: grid;
@@ -995,7 +1134,11 @@ h1, h2, h3 {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0);
+  padding: max(0px, var(--safe-t)) 0 max(0px, var(--safe-b));
+}
+.adv-cam-sheet {
+  /* ensure sheet content isn't under home indicator */
+  padding-bottom: max(1.25rem, calc(0.5rem + var(--safe-b)));
 }
 .adv-cam-sheet {
   width: min(100%, 520px);

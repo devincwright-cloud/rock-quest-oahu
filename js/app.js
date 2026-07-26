@@ -69,7 +69,7 @@ import {
   markCameraGranted,
   queryPermission,
 } from "./permissions.js";
-import { shareOrSavePhoto } from "./share.js";
+import { shareOrSavePhoto, shareOrSaveAlbum } from "./share.js";
 import { formatCoords, osmEmbedUrl, osmLink, reverseGeocode } from "./geo.js";
 import { adjustedConfidence, formatAnswer, testsComplete } from "./fieldtests.js";
 import { rarityBadge, setActiveNav, showModal, sparkleBurst, toast, conf, $ } from "./ui.js";
@@ -103,6 +103,11 @@ const state = {
   /** Sticky “still on this outing” even when browsing place list */
   activeAdventureId: null,
   activeAdventureTitle: "",
+  /** Explore main tabs: places | history */
+  exploreView: "places",
+  /** Full-screen photo viewer: { photos, index, title } | null */
+  photoViewer: null,
+  viewerZoom: 1,
   /** Explore: adventure camera overlay open (phone-first snap flow) */
   adventureCamOpen: false,
   /** Spot id when camera opened for a location photo challenge */
@@ -273,9 +278,10 @@ async function render({ preserveScroll = false } = {}) {
   try {
     if (!state.visionStatus) state.visionStatus = await getVisionStatus();
     const body = await fn();
-    app.innerHTML = `${renderStickyAdventureBar()}${body}`;
+    app.innerHTML = `${renderStickyAdventureBar()}${body}${renderPhotoViewer()}`;
     bindScreen();
     bindStickyAdventureBar();
+    bindPhotoViewer();
     ensureLocationWatch();
     if (preserveScroll) {
       requestAnimationFrame(() => window.scrollTo(0, scrollY));
@@ -763,13 +769,28 @@ async function renderExplore() {
     return checked.has(id) || completedIds.has(id) || albumsForSpot(albums, s).length > 0;
   }).length;
 
+  const view = state.exploreView === "history" ? "history" : "places";
+
   return `
     <section class="screen explore-screen">
       <header class="screen-header">
         <h1>Explore</h1>
-        <p>Find places · hunt rocks · snap memories</p>
+        <p>Find places · hunt rocks · browse past adventures</p>
       </header>
 
+      <div class="explore-tabs" role="tablist">
+        <button type="button" class="explore-tab ${view === "places" ? "on" : ""}" data-explore-view="places" role="tab">
+          🪨 Places
+        </button>
+        <button type="button" class="explore-tab ${view === "history" ? "on" : ""}" data-explore-view="history" role="tab">
+          📚 Past adventures${albums.length ? ` (${albums.length})` : ""}
+        </button>
+      </div>
+
+      ${
+        view === "history"
+          ? renderPastAdventuresList(albums)
+          : `
       <div class="card explore-top-card">
         <div class="explore-loc-row">
           <div>
@@ -844,7 +865,7 @@ async function renderExplore() {
       </div>
 
       <div class="card adventure-albums explore-albums-card">
-        <h3>📚 Adventure albums</h3>
+        <h3>📚 Recent adventures</h3>
         <button type="button" class="btn btn-secondary btn-full" id="btn-adv-photo">
           📸 Add photo to today’s adventure
         </button>
@@ -852,32 +873,55 @@ async function renderExplore() {
           albums.length
             ? `<div class="album-list">
                 ${albums
-                  .slice(0, 6)
-                  .map((a) => {
-                    const cover = a.photos?.[0]?.dataUrl;
-                    const n = a.photos?.length || 0;
-                    return `
-                    <button type="button" class="album-row" data-open-album="${a.id}">
-                      <div class="album-cover">${cover ? `<img src="${cover}" alt="" />` : "🗺️"}</div>
-                      <div class="album-info">
-                        <strong>${escapeHtml(a.title || "Adventure")}</strong>
-                        <span>${escapeHtml(a.subtitle || a.dateKey || "")}</span>
-                        <em>${n} photo${n === 1 ? "" : "s"}</em>
-                      </div>
-                      <span class="album-chevron">›</span>
-                    </button>`;
-                  })
+                  .slice(0, 3)
+                  .map((a) => renderAlbumRow(a))
                   .join("")}
               </div>
-              ${albums.length > 6 ? `<p class="muted small center">Showing latest 6 albums</p>` : ""}`
+              <button type="button" class="btn btn-ghost btn-full" data-explore-view="history" style="margin-top:0.5rem">
+                Browse all past adventures →
+              </button>`
             : `<p class="muted small">No albums yet — snap a place photo to start one!</p>`
         }
-      </div>
+      </div>`
+      }
       ${renderAdventureCameraOverlay()}
 
       <p class="muted small center explore-safety">🛡️ Only take rocks where allowed · Go with a grown-up · Leave living coral alone</p>
     </section>
   `;
+}
+
+function renderAlbumRow(a) {
+  const cover = a.photos?.[0]?.dataUrl;
+  const n = a.photos?.length || 0;
+  return `
+    <button type="button" class="album-row" data-open-album="${a.id}">
+      <div class="album-cover">${cover ? `<img src="${cover}" alt="" />` : "🗺️"}</div>
+      <div class="album-info">
+        <strong>${escapeHtml(a.title || "Adventure")}</strong>
+        <span>${escapeHtml(a.subtitle || a.dateKey || "")}</span>
+        <em>${n} photo${n === 1 ? "" : "s"}</em>
+      </div>
+      <span class="album-chevron">›</span>
+    </button>`;
+}
+
+function renderPastAdventuresList(albums) {
+  return `
+    <div class="card past-adventures-card">
+      <h3>📚 Past adventures</h3>
+      <p class="muted small">Every outing you’ve saved — open one to view, zoom, or save all photos.</p>
+      <button type="button" class="btn btn-primary btn-full" id="btn-adv-photo" style="margin:0.65rem 0">
+        📸 Start / add to today’s adventure
+      </button>
+      ${
+        albums.length
+          ? `<div class="album-list album-list-full">
+              ${albums.map((a) => renderAlbumRow(a)).join("")}
+            </div>`
+          : `<div class="empty-card"><p>No adventures yet. Snap a trail or beach photo to begin!</p></div>`
+      }
+    </div>`;
 }
 
 function renderMaybeGroup(title, items, rarity) {
@@ -989,30 +1033,39 @@ function renderAdventureAlbumDetail(album) {
   return `
     <section class="screen explore-screen">
       <header class="screen-header">
-        <button type="button" class="btn btn-secondary" id="btn-back-albums">← All adventures</button>
+        <button type="button" class="btn btn-secondary" id="btn-back-albums">← Past adventures</button>
         <h1 style="margin-top:0.75rem">${escapeHtml(album.title || "Adventure")}</h1>
         <p>${escapeHtml(album.subtitle || "")} · ${photos.length} photo${photos.length === 1 ? "" : "s"}</p>
       </header>
       <div class="card">
-        <p class="muted small">Memory album for this outing. Add more photos while you’re still here!</p>
+        <p class="muted small">Tap a photo to open full screen &amp; zoom. Save the whole outing to your phone anytime.</p>
         <button type="button" class="btn btn-primary btn-full" id="btn-adv-photo" style="margin:0.65rem 0">
           📸 Add photo to this adventure
         </button>
-        <p class="muted small">Opens your phone camera — quick snap for the album!</p>
-        <button type="button" class="btn btn-secondary btn-full" id="btn-rename-album">✏️ Rename album</button>
+        ${
+          photos.length
+            ? `<button type="button" class="btn btn-secondary btn-full" id="btn-save-album-all">
+                📤 Save whole album to Photos (${photos.length})
+              </button>`
+            : ""
+        }
+        <button type="button" class="btn btn-secondary btn-full" id="btn-rename-album" style="margin-top:0.5rem">✏️ Rename album</button>
       </div>
       ${
         photos.length
           ? `<div class="adv-grid">
               ${photos
                 .map(
-                  (p) => `
+                  (p, idx) => `
                 <figure class="adv-card">
-                  <img src="${p.dataUrl}" alt="" />
+                  <button type="button" class="adv-card-open" data-view-photo="${idx}" aria-label="Open photo full screen">
+                    <img src="${p.dataUrl}" alt="" />
+                    <span class="adv-card-zoom-hint">🔍 Tap to zoom</span>
+                  </button>
                   <figcaption>
                     ${p.placeLabel ? `<strong>${escapeHtml(p.placeLabel)}</strong>` : ""}
                     <div class="adv-photo-actions">
-                      <button type="button" class="btn btn-secondary btn-sm" data-share-adv="${p.id}">📤 Save / Share</button>
+                      <button type="button" class="btn btn-secondary btn-sm" data-share-adv="${p.id}">📤 Save</button>
                       <button type="button" class="btn-ghost-sm btn-del-photo" data-del-adv="${p.id}">🗑️ Delete</button>
                     </div>
                   </figcaption>
@@ -1034,6 +1087,134 @@ function renderAdventureAlbumDetail(album) {
       ${renderAdventureCameraOverlay()}
     </section>
   `;
+}
+
+/** Full-screen adventure photo review with pinch/button zoom */
+function renderPhotoViewer() {
+  const pv = state.photoViewer;
+  if (!pv?.photos?.length) return "";
+  const idx = Math.max(0, Math.min(pv.index || 0, pv.photos.length - 1));
+  const photo = pv.photos[idx];
+  if (!photo?.dataUrl) return "";
+  const z = state.viewerZoom || 1;
+  return `
+    <div class="photo-viewer" id="photo-viewer" role="dialog" aria-label="Photo full screen">
+      <header class="photo-viewer-top">
+        <button type="button" class="btn btn-ghost" id="btn-viewer-close" aria-label="Close">✕</button>
+        <div class="photo-viewer-meta">
+          <strong>${escapeHtml(pv.title || "Photo")}</strong>
+          <span>${idx + 1} / ${pv.photos.length}</span>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-viewer-share">📤 Save</button>
+      </header>
+      <div class="photo-viewer-stage" id="photo-viewer-stage">
+        <img src="${photo.dataUrl}" alt="" id="viewer-img" style="transform: scale(${z})" draggable="false" />
+      </div>
+      <div class="photo-viewer-bottom">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-viewer-prev" ${idx <= 0 ? "disabled" : ""}>‹ Prev</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-viewer-zoom-out">−</button>
+        <span class="zoom-label">${z.toFixed(1)}×</span>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-viewer-zoom-in">+</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-viewer-next" ${idx >= pv.photos.length - 1 ? "disabled" : ""}>Next ›</button>
+      </div>
+    </div>`;
+}
+
+function openPhotoViewer(photos, index, title) {
+  state.photoViewer = {
+    photos: (photos || []).filter((p) => p?.dataUrl),
+    index: index || 0,
+    title: title || "Adventure photo",
+  };
+  state.viewerZoom = 1;
+}
+
+function closePhotoViewer() {
+  state.photoViewer = null;
+  state.viewerZoom = 1;
+}
+
+function bindPhotoViewer() {
+  if (!state.photoViewer) return;
+
+  const setZoom = (z) => {
+    state.viewerZoom = Math.max(1, Math.min(4, z));
+    const img = $("#viewer-img");
+    if (img) img.style.transform = `scale(${state.viewerZoom})`;
+    const label = document.querySelector(".photo-viewer-bottom .zoom-label");
+    if (label) label.textContent = `${state.viewerZoom.toFixed(1)}×`;
+  };
+
+  $("#btn-viewer-close")?.addEventListener("click", async () => {
+    closePhotoViewer();
+    await render({ preserveScroll: true });
+  });
+  $("#btn-viewer-prev")?.addEventListener("click", async () => {
+    if (!state.photoViewer || state.photoViewer.index <= 0) return;
+    state.photoViewer.index -= 1;
+    state.viewerZoom = 1;
+    await render({ preserveScroll: true });
+  });
+  $("#btn-viewer-next")?.addEventListener("click", async () => {
+    if (!state.photoViewer) return;
+    if (state.photoViewer.index >= state.photoViewer.photos.length - 1) return;
+    state.photoViewer.index += 1;
+    state.viewerZoom = 1;
+    await render({ preserveScroll: true });
+  });
+  $("#btn-viewer-zoom-in")?.addEventListener("click", () => setZoom((state.viewerZoom || 1) + 0.5));
+  $("#btn-viewer-zoom-out")?.addEventListener("click", () => setZoom((state.viewerZoom || 1) - 0.5));
+  $("#btn-viewer-share")?.addEventListener("click", async () => {
+    const p = state.photoViewer?.photos?.[state.photoViewer.index];
+    if (!p?.dataUrl) return;
+    try {
+      const how = await shareOrSavePhoto(p.dataUrl, {
+        title: state.photoViewer.title || "Adventure photo",
+        filename: `adventure-${Date.now()}.jpg`,
+      });
+      if (how !== "cancelled") toast("Shared — Save Image to keep it in Photos!", "success");
+    } catch (e) {
+      toast(e.message || "Could not share", "error");
+    }
+  });
+
+  // Pinch-to-zoom on the stage
+  const stage = $("#photo-viewer-stage");
+  if (stage) {
+    let startDist = 0;
+    let startZoom = 1;
+    const dist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    stage.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length === 2) {
+          startDist = dist(e.touches[0], e.touches[1]);
+          startZoom = state.viewerZoom || 1;
+        }
+      },
+      { passive: true }
+    );
+    stage.addEventListener(
+      "touchmove",
+      (e) => {
+        if (e.touches.length === 2 && startDist > 0) {
+          e.preventDefault();
+          const scale = dist(e.touches[0], e.touches[1]) / startDist;
+          setZoom(startZoom * scale);
+        }
+      },
+      { passive: false }
+    );
+    // Double-tap toggle zoom
+    let lastTap = 0;
+    stage.addEventListener("click", () => {
+      const now = Date.now();
+      if (now - lastTap < 320) {
+        setZoom((state.viewerZoom || 1) > 1.2 ? 1 : 2.5);
+      }
+      lastTap = now;
+    });
+  }
 }
 
 function findSpotById(id) {
@@ -2139,8 +2320,62 @@ function bindExplore() {
 
   $("#btn-back-albums")?.addEventListener("click", async () => {
     state.adventureAlbumId = null;
+    state.exploreView = "history";
     closeAdventureCamera();
+    closePhotoViewer();
     await render();
+  });
+
+  app.querySelectorAll("[data-explore-view]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      state.exploreView = btn.dataset.exploreView === "history" ? "history" : "places";
+      state.adventureAlbumId = null;
+      await render();
+    });
+  });
+
+  app.querySelectorAll("[data-view-photo]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.dataset.viewPhoto);
+      const alb = state.adventureAlbumId
+        ? await getAdventureAlbum(state.adventureAlbumId)
+        : null;
+      if (!alb?.photos?.length) return;
+      openPhotoViewer(alb.photos, idx, alb.title || "Adventure");
+      await render({ preserveScroll: true });
+    });
+  });
+
+  $("#btn-save-album-all")?.addEventListener("click", async () => {
+    const alb = state.adventureAlbumId
+      ? await getAdventureAlbum(state.adventureAlbumId)
+      : null;
+    const photos = alb?.photos || [];
+    if (!photos.length) {
+      toast("No photos to save yet", "info");
+      return;
+    }
+    try {
+      toast(`Preparing ${photos.length} photos…`, "info");
+      const result = await shareOrSaveAlbum(photos, {
+        title: alb.title || "Rock Quest Oahu adventure",
+        albumName: alb.title || "adventure",
+        onProgress: (i, n) => {
+          if (i === 1 || i === n) toast(`Saving photo ${i} of ${n}…`, "info");
+        },
+      });
+      if (result.mode === "cancelled") {
+        toast("Save cancelled", "info");
+      } else if (result.mode === "shared") {
+        toast(`Shared ${result.count} photos — pick Save Image / Photos!`, "success");
+      } else if (result.mode === "partial") {
+        toast(`Saved ${result.count} photos before cancel`, "info");
+      } else {
+        toast(`Downloaded ${result.count} photos to your device`, "success");
+      }
+    } catch (e) {
+      toast(e.message || "Could not save album", "error");
+    }
   });
 
   app.querySelectorAll("[data-open-album]").forEach((btn) => {
