@@ -135,6 +135,40 @@ export async function completePhotoChallenge({ spotId, name, title, lat, lng }) 
   return { isNew: true, completed: map };
 }
 
+/**
+ * Photos saved offline / for later identify (weak signal).
+ * [{ id, dataUrl, foundOutside, location, createdAt, note }]
+ */
+export async function getPendingIdentifies() {
+  return (await getMeta("pendingIdentifies", [])) || [];
+}
+
+export async function addPendingIdentify(entry) {
+  const list = await getPendingIdentifies();
+  const item = {
+    id: entry.id || `pend_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    dataUrl: entry.dataUrl,
+    foundOutside: !!entry.foundOutside,
+    location: entry.location || null,
+    note: entry.note || "",
+    createdAt: entry.createdAt || Date.now(),
+  };
+  const next = [item, ...list.filter((p) => p.id !== item.id)].slice(0, 10);
+  await setMeta("pendingIdentifies", next);
+  return item;
+}
+
+export async function removePendingIdentify(id) {
+  const list = await getPendingIdentifies();
+  const next = list.filter((p) => p.id !== id);
+  await setMeta("pendingIdentifies", next);
+  return next;
+}
+
+export async function clearPendingIdentifies() {
+  await setMeta("pendingIdentifies", []);
+}
+
 export async function markSeen(rockId, sample) {
   const db = await openDb();
   const tx = db.transaction("seen", "readwrite");
@@ -416,6 +450,7 @@ async function addAdventurePhotoToAlbum(entry, { albums = [], skipSave = false }
       subtitle: formatDayLabel(dateKey),
       placeLabel: placeLabel || "",
       placeKey: pKey,
+      spotId: entry.spotId || null,
       dateKey,
       centroid: lat != null ? { lat, lng } : null,
       createdAt,
@@ -424,6 +459,8 @@ async function addAdventurePhotoToAlbum(entry, { albums = [], skipSave = false }
     };
     albums = [album, ...albums];
   }
+
+  if (entry.spotId && !album.spotId) album.spotId = entry.spotId;
 
   album.photos = [photo, ...(album.photos || [])].slice(0, MAX_PHOTOS_PER_ALBUM);
   album.updatedAt = createdAt;

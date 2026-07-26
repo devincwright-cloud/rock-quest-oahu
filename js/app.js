@@ -2,6 +2,7 @@ import {
   addAdventurePhoto,
   addCheckIn,
   addFind,
+  addPendingIdentify,
   bumpIdentifyCount,
   completePhotoChallenge,
   deleteAdventureAlbum,
@@ -10,7 +11,9 @@ import {
   getAdventureAlbums,
   getAdventurePhotos,
   getAllFinds,
+  getPendingIdentifies,
   getPhotoChallengesCompleted,
+  removePendingIdentify,
   renameAdventureAlbum,
   getAllSeen,
   getCheckIns,
@@ -21,7 +24,14 @@ import {
   setFlag,
   updateFind,
 } from "./store.js";
-import { clearVisionStatusCache, fileToDataUrl, getVisionStatus, identifyRock, saveApiKey } from "./identify.js";
+import {
+  clearVisionStatusCache,
+  compressForUpload,
+  fileToDataUrl,
+  getVisionStatus,
+  identifyRock,
+  saveApiKey,
+} from "./identify.js";
 import {
   evaluateBadges,
   grantAdventurePhotoXp,
@@ -280,13 +290,39 @@ function visionBannerHtml() {
 async function renderIdentify() {
   const hasPhoto = !!state.photoDataUrl;
   const result = state.lastResult;
+  const pending = await getPendingIdentifies();
   return `
     <section class="screen identify-screen">
       <header class="screen-header">
         <h1>Identify</h1>
-        <p>Point your camera at a rock — or pick a photo from your gallery.</p>
+        <p>Snap a rock — works even when signal is weak (save for later!).</p>
       </header>
       ${visionBannerHtml()}
+
+      ${
+        pending.length
+          ? `<div class="card pending-id-card">
+              <h3>📦 Saved for later (${pending.length})</h3>
+              <p class="muted small">Photos waiting for better signal. Tap one to identify now.</p>
+              <div class="pending-id-list">
+                ${pending
+                  .map(
+                    (p) => `
+                  <div class="pending-id-row">
+                    <img src="${p.dataUrl}" alt="" />
+                    <div>
+                      <strong>Saved photo</strong>
+                      <span class="muted small">${new Date(p.createdAt).toLocaleString()}</span>
+                    </div>
+                    <button type="button" class="btn btn-primary btn-sm" data-pending-run="${p.id}">Identify</button>
+                    <button type="button" class="btn-ghost-sm" data-pending-del="${p.id}">Remove</button>
+                  </div>`
+                  )
+                  .join("")}
+              </div>
+            </div>`
+          : ""
+      }
 
       <div class="camera-card">
         <div class="viewfinder ${hasPhoto ? "has-photo" : ""}" id="viewfinder">
@@ -310,14 +346,18 @@ async function renderIdentify() {
           <input type="checkbox" id="id-outdoor-check" ${state.foundOutside ? "checked" : ""} />
           🌞 Found outside / on an adventure
         </label>
-        <p class="muted small outdoor-id-hint">
-          Checked: uses your location only as a <strong>gentle</strong> geography hint (visual evidence still wins).
-          Unchecked: no location bias at all.
-        </p>
         <button class="btn btn-primary btn-xl btn-full" id="btn-identify" ${hasPhoto ? "" : "disabled"}>
           ✨ Identify this rock!
         </button>
-        ${hasPhoto ? `<button class="btn btn-ghost btn-full" id="btn-clear-photo" type="button">Clear photo</button>` : ""}
+        ${
+          hasPhoto
+            ? `<button class="btn btn-secondary btn-full" type="button" id="btn-save-later" style="margin-top:0.5rem">
+                📦 Save for later (weak signal)
+              </button>
+              <button class="btn btn-ghost btn-full" id="btn-clear-photo" type="button">Clear photo</button>`
+            : ""
+        }
+        <p class="muted small center" style="margin-top:0.5rem">Photos are compressed automatically for slow cell service.</p>
       </div>
 
       <div id="identify-status" class="identify-status hidden"></div>
@@ -529,6 +569,24 @@ function dexCard(f) {
     </article>`;
 }
 
+/** Match adventure albums to a named spot (by spotId or place name). */
+function albumsForSpot(albums, spot) {
+  if (!albums?.length || !spot) return [];
+  const id = spot.id || spot.spotId;
+  const name = (spot.name || "").toLowerCase();
+  const tokens = name
+    .replace(/[()ʻ'']/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 3 && !/^(the|and|park|beach|point|trail|area|public)$/i.test(t));
+
+  return albums.filter((a) => {
+    if (id && a.spotId === id) return true;
+    const blob = `${a.title || ""} ${a.placeLabel || ""} ${a.subtitle || ""}`.toLowerCase();
+    if (name && blob.includes(name.slice(0, Math.min(name.length, 18)))) return true;
+    return tokens.some((t) => blob.includes(t));
+  });
+}
+
 async function renderExplore() {
   const range = state.range;
   const loc = state.location;
@@ -543,7 +601,7 @@ async function renderExplore() {
   const completedMap = await getPhotoChallengesCompleted();
   const completedIds = new Set(Object.keys(completedMap));
   const nearChallenges = loc ? getNearbyChallengeSpots(loc, { completedIds }) : [];
-  const activeNear = nearChallenges.find((s) => !s.challengeDone) || nearChallenges[0] || null;
+  const activeNear = nearChallenges.find((s) => !s.challengeDone) || null;
   const albums = await getAdventureAlbums();
   const openAlbum = state.adventureAlbumId
     ? albums.find((a) => a.id === state.adventureAlbumId) || (await getAdventureAlbum(state.adventureAlbumId))
@@ -553,22 +611,44 @@ async function renderExplore() {
     return renderAdventureAlbumDetail(openAlbum);
   }
 
+  const visitedCount = allSpots.filter((s) => {
+    const id = s.id;
+    return checked.has(id) || completedIds.has(id) || albumsForSpot(albums, s).length > 0;
+  }).length;
+
   return `
     <section class="screen explore-screen">
       <header class="screen-header">
-        <h1>Explore Nearby</h1>
-        <p>Pick a mission, hunt special rocks, snap the highlight, fill your Dex!</p>
+        <h1>Explore</h1>
+        <p>Find places · hunt rocks · snap memories</p>
       </header>
 
-      <div class="card">
-        <h3>Your location</h3>
-        <p class="muted" id="loc-status">${
-          loc
-            ? `📍 Locked in (±${Math.round(loc.accuracy || 0)} m)`
-            : "Needed for drive-time suggestions, check-ins, and outdoor rock pins."
-        }</p>
-        <button class="btn btn-primary" type="button" id="btn-locate">📍 Use my location</button>
-        <p class="muted small" style="margin-top:0.5rem">Location alone doesn’t give XP — check-ins, photo challenges, and outdoor finds do!</p>
+      <div class="card explore-top-card">
+        <div class="explore-loc-row">
+          <div>
+            <strong>📍 ${loc ? "Location on" : "Location needed"}</strong>
+            <p class="muted small" id="loc-status">${
+              loc
+                ? `Ready for drive times &amp; check-ins (±${Math.round(loc.accuracy || 0)} m)`
+                : "Turn on location to see places near you"
+            }</p>
+          </div>
+          <button class="btn btn-primary" type="button" id="btn-locate">${loc ? "Refresh" : "Use my location"}</button>
+        </div>
+        <div class="explore-range-row">
+          <span class="muted small">How far?</span>
+          <div class="range-seg">
+            ${["short", "medium", "longer"]
+              .map(
+                (k) =>
+                  `<button type="button" class="range-btn ${range === k ? "on" : ""}" data-range="${k}">${
+                    k === "short" ? "Short" : k === "medium" ? "Medium" : "Longer"
+                  }</button>`
+              )
+              .join("")}
+          </div>
+        </div>
+        <p class="muted small">${escapeHtml(rocks.range.blurb)}</p>
       </div>
 
       ${
@@ -577,17 +657,55 @@ async function renderExplore() {
           : ""
       }
 
-      <div class="card adventure-albums">
+      <div class="card explore-places-card">
+        <div class="explore-places-head">
+          <h3>🪨 Places to explore</h3>
+          <p class="muted small">
+            ${allSpots.length ? `${spots.length} of ${allSpots.length}` : "None in this range"}
+            ${visitedCount ? ` · ✅ ${visitedCount} visited` : ""}
+          </p>
+        </div>
+        <div class="spot-list" id="spot-list">
+          ${
+            spots.length
+              ? spots
+                  .map((s) =>
+                    renderSpotCard(s, {
+                      loc,
+                      checked,
+                      completedIds,
+                      albums: albumsForSpot(albums, s),
+                    })
+                  )
+                  .join("")
+              : `<div class="empty-card">
+                  <p>No places in the <strong>${escapeHtml(rocks.range.label)}</strong> band from here.</p>
+                  <p class="muted small">Try Short / Medium / Longer, or turn on location.</p>
+                </div>`
+          }
+        </div>
+        ${
+          remaining > 0
+            ? `<div class="show-more-wrap" id="spot-show-more-wrap">
+                <button type="button" class="btn btn-secondary btn-full" id="btn-show-more-spots">
+                  ⬇️ Show more (${remaining} left)
+                </button>
+                <div id="spot-scroll-sentinel" class="spot-scroll-sentinel" aria-hidden="true"></div>
+              </div>`
+            : ""
+        }
+      </div>
+
+      <div class="card adventure-albums explore-albums-card">
         <h3>📚 Adventure albums</h3>
-        <p class="muted small">Each outing gets its own album — grouped by place &amp; day (trail, beach, drive…).</p>
-        <button type="button" class="btn btn-secondary btn-full" id="btn-adv-photo" style="margin:0.65rem 0">
+        <button type="button" class="btn btn-secondary btn-full" id="btn-adv-photo">
           📸 Add photo to today’s adventure
         </button>
-        <p class="muted small">Opens your phone camera — snap the trail, beach, or family!</p>
         ${
           albums.length
             ? `<div class="album-list">
                 ${albums
+                  .slice(0, 6)
                   .map((a) => {
                     const cover = a.photos?.[0]?.dataUrl;
                     const n = a.photos?.length || 0;
@@ -603,78 +721,14 @@ async function renderExplore() {
                     </button>`;
                   })
                   .join("")}
-              </div>`
-            : `<p class="muted small">No adventures yet — snap a trail or beach view to start an album!</p>`
+              </div>
+              ${albums.length > 6 ? `<p class="muted small center">Showing latest 6 albums</p>` : ""}`
+            : `<p class="muted small">No albums yet — snap a place photo to start one!</p>`
         }
       </div>
       ${renderAdventureCameraOverlay()}
 
-      <div class="card">
-        <h3>How far can we roam?</h3>
-        <p class="muted small">Based on <strong>drive time</strong> (not straight-line miles) — better for Oahu roads!</p>
-        <div class="range-seg">
-          ${["short", "medium", "longer"]
-            .map(
-              (k) =>
-                `<button type="button" class="range-btn ${range === k ? "on" : ""}" data-range="${k}">${
-                  k === "short" ? "Short" : k === "medium" ? "Medium" : "Longer"
-                }</button>`
-            )
-            .join("")}
-        </div>
-        <p class="muted small">${rocks.range.blurb}</p>
-      </div>
-
-      <div class="card">
-        <h3>Rocks you might spot nearby</h3>
-        <p class="muted small">Local-style suggestions for your area — separate from photo ID.</p>
-        <div class="maybe-grid">
-          ${renderMaybeGroup("Common", rocks.common, "common")}
-          ${renderMaybeGroup("Uncommon", rocks.uncommon, "uncommon")}
-          ${renderMaybeGroup("Rare maybes", rocks.rare, "rare")}
-          ${rocks.ultra?.length ? renderMaybeGroup("Ultra Rare long-shots", rocks.ultra, "ultra") : ""}
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>🪨 Rock hunt missions</h3>
-        <p class="muted small">
-          <strong>${rocks.range.label}</strong> drives — each place has a unique mission, likely finds, and lucky teases!
-          ${
-            allSpots.length
-              ? ` Showing <strong>${spots.length}</strong> of <strong>${allSpots.length}</strong>.`
-              : ""
-          }
-        </p>
-        <div class="spot-list" id="spot-list">
-          ${
-            spots.length
-              ? spots.map((s) => renderSpotCard(s, { loc, checked, completedIds })).join("")
-              : `<div class="empty-card">
-                  <p>No places in the <strong>${escapeHtml(rocks.range.label)}</strong> drive band from where you are.</p>
-                  <p class="muted small">Try a different filter, or hop to another side of the island!</p>
-                </div>`
-          }
-        </div>
-        ${
-          remaining > 0
-            ? `<div class="show-more-wrap" id="spot-show-more-wrap">
-                <button type="button" class="btn btn-secondary btn-full" id="btn-show-more-spots">
-                  ⬇️ Show more places (${remaining} left)
-                </button>
-                <p class="muted small center" style="margin-top:0.4rem">Keep scrolling the page — more load as you go!</p>
-                <div id="spot-scroll-sentinel" class="spot-scroll-sentinel" aria-hidden="true"></div>
-              </div>`
-            : allSpots.length
-              ? `<p class="muted small center" style="margin-top:0.75rem">That’s every ${escapeHtml(rocks.range.label.toLowerCase())} place we know from here. Try another filter!</p>`
-              : ""
-        }
-      </div>
-
-      <div class="tip-card warn">
-        <strong>Collecting rules</strong>
-        <p>Only take rocks where it’s allowed. Never climb cliffs. Leave living coral alone. Go with a grown-up!</p>
-      </div>
+      <p class="muted small center explore-safety">🛡️ Only take rocks where allowed · Go with a grown-up · Leave living coral alone</p>
     </section>
   `;
 }
@@ -695,108 +749,90 @@ function renderMaybeGroup(title, items, rarity) {
     </div>`;
 }
 
-/** One adventure place card — mission + varied finds, then photo challenge & check-in */
-function renderSpotCard(s, { loc, checked, completedIds }) {
-  const done = checked.has(s.spotId || s.id);
+/** Compact place card — clear for kids, visited + album link when explored */
+function renderSpotCard(s, { loc, checked, completedIds, albums = [] }) {
   const id = s.spotId || s.id;
+  const visited = checked.has(id) || completedIds.has(id) || albums.length > 0;
   const gate = canCheckInAt({ ...s, spotId: id }, loc);
   const ch = getPhotoChallenge(s);
   const chDone = completedIds.has(id);
   const nearEnough = loc && s.lat != null && s.distanceKm != null && s.distanceKm <= 1.0;
   const m = s.mission || {};
   const rockFinds = s.rockFinds || m.finds || [];
-  const likely = rockFinds.filter((r) => r.chance === "likely");
-  const lucky = rockFinds.filter((r) => r.chance === "lucky");
-  const longshot = rockFinds.filter((r) => r.chance === "longshot");
+  const latestAlbum = albums[0] || null;
 
   return `
-    <article class="spot-card ${done ? "checked" : ""}" data-spot="${id}">
-      <div class="spot-mission-badge">${m.emoji || "🪨"} Mission</div>
-      <h4>${escapeHtml(s.name)} ${done ? "✅" : ""}</h4>
+    <article class="spot-card ${visited ? "visited checked" : ""}" data-spot="${id}">
+      ${
+        visited
+          ? `<div class="visited-banner">
+              <span>✅ You’ve been here!</span>
+              ${
+                latestAlbum
+                  ? `<button type="button" class="btn btn-secondary btn-sm" data-open-album="${latestAlbum.id}">
+                      📚 Open adventure album
+                    </button>`
+                  : ""
+              }
+            </div>`
+          : ""
+      }
+      <h4>${escapeHtml(s.name)}</h4>
       <p class="muted small">${escapeHtml(s.area)} · ${escapeHtml(s.driveLabel || formatDistance(s.distanceKm))}</p>
-      <p class="spot-mission-title">${escapeHtml(m.title || "Rock Hunt Mission")}</p>
+      <p class="spot-mission-title">${m.emoji || "🪨"} ${escapeHtml(m.title || "Rock hunt")}</p>
       <p class="spot-mission-hook">${escapeHtml(m.hook || s.why || "")}</p>
 
-      <div class="spot-rock-hunt">
-        <div class="spot-rock-hunt-label">🪨 What to hunt here</div>
-        ${
-          rockFinds.length
-            ? `<div class="rock-chip-row">
-                ${rockFinds
-                  .map(
-                    (r) =>
-                      `<span class="rock-chip ${r.chanceClass || ""} rarity-${r.rarity || "common"}" title="${escapeAttr(r.look || r.hint || "")}">
-                        ${r.chanceEmoji || ""} ${escapeHtml(r.name)}
-                        <em>${escapeHtml(r.chanceShort || "")}</em>
-                      </span>`
-                  )
-                  .join("")}
-              </div>`
-            : ""
-        }
-        <p class="spot-look-for"><strong>Look for:</strong> ${escapeHtml(m.lookFor || "Colors, textures, and shiny bits!")}</p>
-        ${
-          m.rarityTease
-            ? `<p class="spot-rarity-tease">✨ ${escapeHtml(m.rarityTease)}</p>`
-            : ""
-        }
-        <ul class="spot-rock-hints">
-          ${likely
-            .map(
-              (r) =>
-                `<li class="find-likely"><span class="find-tag">Likely</span> <strong>${escapeHtml(r.name)}</strong> — ${escapeHtml(r.look)}</li>`
-            )
-            .join("")}
-          ${lucky
-            .map(
-              (r) =>
-                `<li class="find-lucky"><span class="find-tag">Lucky</span> <strong>${escapeHtml(r.name)}</strong> — ${escapeHtml(r.look)}</li>`
-            )
-            .join("")}
-          ${longshot
-            .map(
-              (r) =>
-                `<li class="find-longshot"><span class="find-tag">Longshot</span> <strong>${escapeHtml(r.name)}</strong> — ${escapeHtml(r.look)}</li>`
-            )
-            .join("")}
-        </ul>
-        ${
-          m.collectorHook
-            ? `<p class="spot-collector-hook">🏆 ${escapeHtml(m.collectorHook)}</p>`
-            : ""
-        }
-      </div>
+      ${
+        rockFinds.length
+          ? `<div class="rock-chip-row">
+              ${rockFinds
+                .slice(0, 4)
+                .map(
+                  (r) =>
+                    `<span class="rock-chip ${r.chanceClass || ""}" title="${escapeAttr(r.look || "")}">${escapeHtml(r.name)} <em>${escapeHtml(r.chanceShort || "")}</em></span>`
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
 
-      <div class="spot-mini-challenge">
-        <strong>🎯 Mini challenge</strong>
-        <p>${escapeHtml(m.miniChallenge || "Find a rock + take the special photo for bonus XP!")}</p>
-      </div>
+      <details class="spot-details">
+        <summary>What to look for &amp; tips</summary>
+        <p class="spot-look-for">${escapeHtml(m.lookFor || "Colors, textures, shiny bits!")}</p>
+        ${m.rarityTease ? `<p class="spot-rarity-tease">✨ ${escapeHtml(m.rarityTease)}</p>` : ""}
+        <p class="muted small">🎯 ${escapeHtml(m.miniChallenge || "Find a rock + snap the highlight!")}</p>
+        <p class="tip">🛡️ ${escapeHtml(s.tips)}</p>
+      </details>
 
       <div class="spot-challenge ${chDone ? "done" : nearEnough ? "near" : ""}">
-        <span class="spot-challenge-emoji">${chDone ? "✅" : ch.emoji || "🎯"}</span>
+        <span class="spot-challenge-emoji">${chDone ? "✅" : ch.emoji || "📸"}</span>
         <div>
-          <strong>Photo challenge: ${escapeHtml(ch.title || "Highlight")}</strong>
-          <p>${escapeHtml(ch.prompt)}</p>
+          <strong>${escapeHtml(ch.title || "Photo")}</strong>
+          <p class="muted small">${escapeHtml(ch.prompt)}</p>
           ${
             chDone
-              ? `<em class="muted">Challenge complete!</em>`
+              ? `<em class="muted">Photo challenge done</em>`
               : nearEnough
-                ? `<button type="button" class="btn btn-secondary btn-sm" data-challenge-snap="${escapeAttr(id)}">📸 Snap it for +XP</button>`
-                : `<em class="muted">Get close to unlock snap + XP</em>`
+                ? `<button type="button" class="btn btn-secondary btn-sm" data-challenge-snap="${escapeAttr(id)}">📸 Snap for +XP</button>`
+                : `<em class="muted">Get close to unlock</em>`
           }
         </div>
       </div>
-      <p class="tip">🛡️ ${escapeHtml(s.tips)}</p>
+
       ${
-        done
-          ? `<p class="checkin-done">Checked in — nice adventure!</p>`
+        checked.has(id)
+          ? `<p class="checkin-done">📍 Checked in</p>`
           : `<button type="button" class="btn btn-primary btn-checkin" data-checkin="${id}"
               data-name="${escapeAttr(s.name)}"
               data-generic="${s.generic ? "1" : "0"}"
               data-lat="${s.lat ?? ""}"
               data-lng="${s.lng ?? ""}"
-            >${gate.ok ? "📍 I'm here — Check in!" : "📍 Check in (need to be closer)"}</button>
-            ${!gate.ok && loc ? `<p class="muted small">${escapeHtml(gate.reason || "")}</p>` : ""}`
+            >${gate.ok ? "📍 I'm here — Check in!" : "📍 Check in (get closer)"}</button>`
+      }
+      ${
+        albums.length > 1
+          ? `<p class="muted small">${albums.length} adventure albums from this place</p>`
+          : ""
       }
     </article>`;
 }
@@ -1014,8 +1050,13 @@ function bindIdentify() {
     canvas.width = v.videoWidth;
     canvas.height = v.videoHeight;
     canvas.getContext("2d").drawImage(v, 0, 0);
-    // Smaller JPEG for faster Netlify/xAI identify
-    state.photoDataUrl = canvas.toDataURL("image/jpeg", 0.72);
+    // Compressed JPEG for weak signal
+    try {
+      const raw = canvas.toDataURL("image/jpeg", 0.85);
+      state.photoDataUrl = await compressForUpload(raw, { maxSide: 900, quality: 0.68 });
+    } catch {
+      state.photoDataUrl = canvas.toDataURL("image/jpeg", 0.7);
+    }
     stopCamera();
     state.lastResult = null;
     await render();
@@ -1026,7 +1067,7 @@ function bindIdentify() {
     if (!file) return;
     try {
       stopCamera();
-      state.photoDataUrl = await fileToDataUrl(file, 960, 0.72);
+      state.photoDataUrl = await fileToDataUrl(file, 900, 0.68);
       state.lastResult = null;
       await render();
     } catch {
@@ -1038,6 +1079,35 @@ function bindIdentify() {
     state.photoDataUrl = null;
     state.lastResult = null;
     await render();
+  });
+
+  $("#btn-save-later")?.addEventListener("click", () => savePhotoForLater());
+
+  app.querySelectorAll("[data-pending-run]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.pendingRun;
+      const list = await getPendingIdentifies();
+      const item = list.find((p) => p.id === id);
+      if (!item) return;
+      state.photoDataUrl = item.dataUrl;
+      state.foundOutside = !!item.foundOutside;
+      state.lastResult = null;
+      await render();
+      await runIdentify({
+        dataUrl: item.dataUrl,
+        foundOutside: item.foundOutside,
+        location: item.location,
+        pendingId: item.id,
+      });
+    });
+  });
+
+  app.querySelectorAll("[data-pending-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await removePendingIdentify(btn.dataset.pendingDel);
+      toast("Removed saved photo", "info");
+      await render();
+    });
   });
 
   $("#id-outdoor-check")?.addEventListener("change", (e) => {
@@ -1136,39 +1206,81 @@ async function answerFieldTestOnFind(findId, testId, answer, { reopenEdit = fals
   openFindDetail(findId, { editTests: reopenEdit });
 }
 
-async function runIdentify() {
-  if (!state.photoDataUrl) return;
+async function savePhotoForLater(dataUrl = null, foundOutside = null) {
+  const photo = dataUrl || state.photoDataUrl;
+  if (!photo) {
+    toast("Take a photo first", "error");
+    return;
+  }
+  try {
+    const compressed = await compressForUpload(photo, { maxSide: 800, quality: 0.6 });
+    let location = null;
+    const outdoor = foundOutside != null ? foundOutside : state.foundOutside;
+    if (outdoor && state.outdoorLocation) location = state.outdoorLocation;
+    await addPendingIdentify({
+      dataUrl: compressed,
+      foundOutside: outdoor,
+      location,
+    });
+    toast("📦 Saved! Identify later when signal is better.", "success");
+    state.photoDataUrl = null;
+    state.lastResult = null;
+    await render();
+  } catch (e) {
+    toast(e.message || "Could not save photo", "error");
+  }
+}
+
+function setIdentifyProgress({ message = "Working…", pct = 20 } = {}) {
+  const status = $("#identify-status");
+  if (!status) return;
+  status.classList.remove("hidden");
+  const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+  status.innerHTML = `
+    <div class="id-progress card">
+      <div class="spinner"></div>
+      <p class="id-progress-msg">${escapeHtml(message)}</p>
+      <div class="id-progress-track" aria-hidden="true">
+        <div class="id-progress-fill" style="width:${clamped}%"></div>
+      </div>
+      <p class="muted small">On weak cell signal this can take a bit — we retry automatically.</p>
+    </div>`;
+}
+
+async function runIdentify(opts = {}) {
+  const photo = opts.dataUrl || state.photoDataUrl;
+  if (!photo) return;
+  const pendingId = opts.pendingId || null;
+  const foundOutside = opts.foundOutside != null ? opts.foundOutside : state.foundOutside;
   const status = $("#identify-status");
   const results = $("#identify-results");
-  status.classList.remove("hidden");
-  status.innerHTML = `<div class="spinner"></div><p>Asking the vision model to study your rock…</p>`;
-  results.innerHTML = "";
-  $("#btn-identify").disabled = true;
+  setIdentifyProgress({ message: "Getting ready…", pct: 5 });
+  if (results) results.innerHTML = "";
+  $("#btn-identify") && ($("#btn-identify").disabled = true);
+  $("#btn-save-later") && ($("#btn-save-later").disabled = true);
 
   try {
-    // Refresh vision status (key may have been added)
     state.visionStatus = await getVisionStatus(true);
     if (!state.visionStatus?.vision) {
       status.innerHTML = `
         <div class="setup-error card">
           <h3>🔭 Real vision isn’t configured yet</h3>
-          <p>Rock Quest Oahu needs an <strong>xAI API key</strong> to identify rocks from photos. We don’t fake IDs anymore (that caused the same 3 rocks every time).</p>
+          <p>Rock Quest Oahu needs an <strong>xAI API key</strong> to identify rocks from photos.</p>
           <ol class="setup-steps">
             <li>Get a key at <a href="https://console.x.ai" target="_blank" rel="noopener">console.x.ai</a></li>
             <li><strong>Live site:</strong> Netlify → Environment variables → <code>XAI_API_KEY</code> → Redeploy</li>
-            <li><strong>Local Mac:</strong> paste in the box above, or put it in <code>.env</code> and run <code>python3 server.py</code></li>
+            <li><strong>Local Mac:</strong> paste in the box above, or put it in <code>.env</code></li>
           </ol>
         </div>`;
       toast("Add XAI_API_KEY for real rock IDs", "error");
       return;
     }
 
-    // Soft geo prior only when "found outside" is checked
-    let locationPayload = null;
-    if (state.foundOutside) {
-      status.innerHTML = `<div class="spinner"></div><p>Getting adventure location, then studying your rock…</p>`;
+    let locationPayload = opts.location || null;
+    if (foundOutside && !locationPayload) {
+      setIdentifyProgress({ message: "Getting location (optional)…", pct: 12 });
       try {
-        const pos = await getPosition(10000);
+        const pos = await getPosition(8000);
         state.location = pos;
         const geo = await reverseGeocode(pos.lat, pos.lng);
         state.outdoorLocation = {
@@ -1180,21 +1292,25 @@ async function runIdentify() {
         };
         locationPayload = state.outdoorLocation;
       } catch {
-        toast("Couldn't get location — identifying from the photo only.", "info");
+        toast("No GPS right now — identifying from the photo only.", "info");
         state.outdoorLocation = null;
       }
-      status.innerHTML = `<div class="spinner"></div><p>Asking the vision model to study your rock…</p>`;
-    } else {
+    } else if (!foundOutside) {
       state.outdoorLocation = null;
     }
 
-    const result = await identifyRock(state.photoDataUrl, {
-      foundOutside: state.foundOutside,
+    const result = await identifyRock(photo, {
+      foundOutside,
       location: locationPayload,
+      maxRetries: 3,
+      onProgress: (p) => setIdentifyProgress(p),
     });
     state.lastResult = result;
     state.fieldXpAwarded = new Set();
+    if (!opts.keepPhoto) state.photoDataUrl = photo;
     await bumpIdentifyCount();
+
+    if (pendingId) await removePendingIdentify(pendingId);
 
     const top = result.candidates[0];
     const { isNew } = await markSeen(top.rockId, top);
@@ -1215,6 +1331,7 @@ async function runIdentify() {
     }
 
     await evaluateBadges({ celebrate: true });
+    if (pendingId) await render();
   } catch (e) {
     console.error(e);
     if (e.code === "needs_key") {
@@ -1224,20 +1341,34 @@ async function runIdentify() {
         <div class="setup-error card">
           <h3>API key needed</h3>
           <p>${escapeHtml(e.message)}</p>
-          <p class="muted small">Use the setup box above to paste your key from console.x.ai</p>
         </div>`;
     } else {
+      const canSave = !!state.photoDataUrl || !!photo;
       status.innerHTML = `
         <div class="setup-error card">
-          <h3>Identification failed</h3>
+          <h3>Couldn’t finish identify</h3>
           <p class="error-text">${escapeHtml(e.message)}</p>
-          <p class="muted small">Tips: brighter photo, fill the frame with the rock, check API credits at console.x.ai</p>
+          <p class="muted small">Weak signal is common outdoors. We already retried automatically.</p>
+          <div class="id-fail-actions">
+            <button type="button" class="btn btn-primary" id="btn-retry-identify">🔁 Try again</button>
+            ${
+              canSave
+                ? `<button type="button" class="btn btn-secondary" id="btn-fail-save-later">📦 Save for later</button>`
+                : ""
+            }
+          </div>
         </div>`;
+      $("#btn-retry-identify")?.addEventListener("click", () =>
+        runIdentify({ dataUrl: photo, foundOutside, location: opts.location, pendingId })
+      );
+      $("#btn-fail-save-later")?.addEventListener("click", () => savePhotoForLater(photo, foundOutside));
     }
     toast(e.message, "error");
   } finally {
     const btn = $("#btn-identify");
-    if (btn) btn.disabled = false;
+    if (btn) btn.disabled = !state.photoDataUrl;
+    const saveLater = $("#btn-save-later");
+    if (saveLater) saveLater.disabled = !state.photoDataUrl;
   }
 }
 
@@ -1518,6 +1649,12 @@ async function saveAdventurePhotoFromDataUrl(dataUrl) {
   const openId = state.adventureAlbumId;
   const openAlbum = openId ? await getAdventureAlbum(openId) : null;
   const challengeId = state.challengeSpotId;
+  let compressed = dataUrl;
+  try {
+    compressed = await compressForUpload(dataUrl, { maxSide: 960, quality: 0.7 });
+  } catch {
+    compressed = dataUrl;
+  }
   try {
     const pos = await getPosition(8000);
     state.location = pos;
@@ -1536,12 +1673,13 @@ async function saveAdventurePhotoFromDataUrl(dataUrl) {
   }
 
   const { album } = await addAdventurePhoto({
-    dataUrl,
+    dataUrl: compressed,
     note: challengeSpot ? getPhotoChallenge(challengeSpot).title : "",
     lat,
     lng,
     placeLabel: placeLabel || openAlbum?.placeLabel || "Adventure",
     dateKey: openAlbum?.dateKey,
+    spotId: challengeId || openAlbum?.spotId || null,
   });
   state.adventureAlbumId = album?.id || state.adventureAlbumId;
   await grantAdventurePhotoXp();
