@@ -17,6 +17,13 @@
   <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
+  <!--
+    Physical spacer for notch / Dynamic Island.
+    Must stay outside #app so SPA re-renders and full-screen overlays
+    never collapse top safe-area padding (common iOS Safari bug).
+  -->
+  <div class="ios-safe-top" id="ios-safe-top" aria-hidden="true"></div>
+
   <div class="app-shell">
     <main id="app" class="app-main" aria-live="polite"></main>
 

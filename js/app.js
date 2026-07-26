@@ -110,6 +110,8 @@ const state = {
   viewerZoom: 1,
   /** Scroll Y saved when opening photo viewer (restore after close) */
   photoViewerScrollY: 0,
+  /** Last measured safe-area-inset-top in px (never shrink to 0 mid-session) */
+  safeTopPx: 0,
   /** Explore: adventure camera overlay open (phone-first snap flow) */
   adventureCamOpen: false,
   /** Spot id when camera opened for a location photo challenge */
@@ -1127,19 +1129,63 @@ function renderPhotoViewer() {
 }
 
 /**
- * iOS often shifts the page under the status bar after a fixed full-screen
- * overlay. Lock body while open; restore scroll + safe-area when closed.
+ * Measure safe-area-inset-top in pixels and pin it on the permanent spacer.
+ * iOS can briefly report 0 after fixed overlays; we never shrink below last good value.
+ */
+function measureAndPinSafeTop() {
+  let measured = 0;
+  try {
+    const probe = document.createElement("div");
+    probe.setAttribute("aria-hidden", "true");
+    probe.style.cssText =
+      "position:fixed;top:0;left:0;width:0;visibility:hidden;pointer-events:none;" +
+      "height:constant(safe-area-inset-top);height:env(safe-area-inset-top, 0px);";
+    document.body.appendChild(probe);
+    measured = probe.getBoundingClientRect().height || 0;
+    probe.remove();
+  } catch {
+    measured = 0;
+  }
+
+  // Prefer env() reading; fall back to last known good
+  const last = state.safeTopPx || 0;
+  // Never allow measured 0 to wipe a previously known notch height mid-session
+  // (unless device truly has none and last is also 0)
+  const px = measured > 0 ? measured : last > 0 ? last : 0;
+  if (measured > 0) state.safeTopPx = measured;
+
+  const spacer = document.getElementById("ios-safe-top");
+  if (spacer) {
+    // Explicit px height is more reliable than env() after iOS overlay glitches
+    if (px > 0) {
+      spacer.style.height = `${px}px`;
+      spacer.style.minHeight = `${px}px`;
+    } else {
+      spacer.style.height = "";
+      spacer.style.minHeight = "";
+    }
+  }
+  document.documentElement.style.setProperty("--safe-t-px", `${px}px`);
+  return px;
+}
+
+/**
+ * Lock page scroll without position:fixed on body (that breaks iOS safe-area).
  */
 function lockScrollForPhotoViewer() {
-  const y = window.scrollY || window.pageYOffset || 0;
-  state.photoViewerScrollY = y;
+  // Only capture scroll once when first opening
+  if (!document.documentElement.classList.contains("photo-viewer-open")) {
+    state.photoViewerScrollY = window.scrollY || window.pageYOffset || 0;
+  }
+  measureAndPinSafeTop();
   document.documentElement.classList.add("photo-viewer-open");
   document.body.classList.add("photo-viewer-open");
-  document.body.style.position = "fixed";
-  document.body.style.top = `-${y}px`;
-  document.body.style.left = "0";
-  document.body.style.right = "0";
-  document.body.style.width = "100%";
+  // Clear any leftover inline styles from older builds
+  document.body.style.position = "";
+  document.body.style.top = "";
+  document.body.style.left = "";
+  document.body.style.right = "";
+  document.body.style.width = "";
 }
 
 function unlockScrollAfterPhotoViewer() {
@@ -1151,20 +1197,18 @@ function unlockScrollAfterPhotoViewer() {
   document.body.style.left = "";
   document.body.style.right = "";
   document.body.style.width = "";
-  // Restore scroll after layout is free of position:fixed
+  document.body.style.overflow = "";
+  document.documentElement.style.overflow = "";
+
+  // Re-pin safe area after overlay is gone (critical on notch iPhones)
+  measureAndPinSafeTop();
+
   requestAnimationFrame(() => {
     window.scrollTo(0, y);
-    // Second frame: force iOS to recompute safe-area after overlay removal
+    measureAndPinSafeTop();
     requestAnimationFrame(() => {
       window.scrollTo(0, y);
-      // Nudge layout without visible jump (helps Dynamic Island / notch)
-      const shell = document.querySelector(".app-shell");
-      if (shell) {
-        shell.style.transform = "translateZ(0)";
-        // eslint-disable-next-line no-unused-expressions
-        shell.offsetHeight;
-        shell.style.transform = "";
-      }
+      measureAndPinSafeTop();
     });
   });
 }
@@ -1186,12 +1230,18 @@ function closePhotoViewer() {
 }
 
 function bindPhotoViewer() {
-  // Keep body lock in sync if we re-rendered while viewer is open
+  // Re-assert scroll lock if viewer is open (e.g. after re-render for next/prev).
+  // NEVER call lockScroll when already open in a way that overwrites scrollY with 0.
   if (state.photoViewer) {
-    if (!document.body.classList.contains("photo-viewer-open")) {
+    if (!document.documentElement.classList.contains("photo-viewer-open")) {
       lockScrollForPhotoViewer();
+    } else {
+      // Keep class; re-pin safe area without resetting scroll Y
+      measureAndPinSafeTop();
+      document.body.style.position = "";
+      document.body.style.top = "";
     }
-  } else if (document.body.classList.contains("photo-viewer-open")) {
+  } else if (document.documentElement.classList.contains("photo-viewer-open")) {
     unlockScrollAfterPhotoViewer();
   }
 
@@ -1206,12 +1256,14 @@ function bindPhotoViewer() {
   };
 
   const closeAndRender = async () => {
-    closePhotoViewer();
-    // Do NOT preserveScroll here — unlockScrollAfterPhotoViewer restores it
-    await render({ preserveScroll: false });
-    // Re-apply saved scroll after render rewrote the DOM
     const y = state.photoViewerScrollY || 0;
-    requestAnimationFrame(() => window.scrollTo(0, y));
+    closePhotoViewer();
+    await render({ preserveScroll: false });
+    measureAndPinSafeTop();
+    requestAnimationFrame(() => {
+      window.scrollTo(0, y);
+      measureAndPinSafeTop();
+    });
   };
 
   $("#btn-viewer-close")?.addEventListener("click", () => closeAndRender());
@@ -1219,7 +1271,6 @@ function bindPhotoViewer() {
     if (!state.photoViewer || state.photoViewer.index <= 0) return;
     state.photoViewer.index -= 1;
     state.viewerZoom = 1;
-    // Stay locked; re-render overlay content only
     await render({ preserveScroll: false });
   });
   $("#btn-viewer-next")?.addEventListener("click", async () => {
@@ -1272,7 +1323,6 @@ function bindPhotoViewer() {
       },
       { passive: false }
     );
-    // Double-tap toggle zoom
     let lastTap = 0;
     stage.addEventListener("click", () => {
       const now = Date.now();
@@ -2627,6 +2677,17 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   });
+}
+
+// Pin safe-area spacer before first paint issues on iOS
+measureAndPinSafeTop();
+window.addEventListener("resize", () => measureAndPinSafeTop());
+window.addEventListener("orientationchange", () => {
+  setTimeout(() => measureAndPinSafeTop(), 250);
+});
+// visualViewport changes when iOS chrome shows/hides after overlays
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => measureAndPinSafeTop());
 }
 
 // Restore adventure session + location if already permitted (no re-prompt loop)
