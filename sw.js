@@ -1,5 +1,5 @@
 /* Rock Quest Oahu service worker — cache shell for offline collection browsing */
-const CACHE = "rock-quest-oahu-v10";
+const CACHE = "rock-quest-oahu-v11";
 const ASSETS = [
   "/",
   "/index.html",

@@ -7,6 +7,7 @@ import {
   completePhotoChallenge,
   deleteAdventureAlbum,
   deleteAdventurePhoto,
+  deleteFind,
   getAdventureAlbum,
   getAdventureAlbums,
   getAdventurePhotos,
@@ -864,7 +865,7 @@ function renderAdventureAlbumDetail(album) {
                   <img src="${p.dataUrl}" alt="" />
                   <figcaption>
                     ${p.placeLabel ? `<strong>${escapeHtml(p.placeLabel)}</strong>` : ""}
-                    <button type="button" class="btn-ghost-sm" data-del-adv="${p.id}">Remove photo</button>
+                    <button type="button" class="btn-ghost-sm btn-del-photo" data-del-adv="${p.id}">🗑️ Delete photo</button>
                   </figcaption>
                 </figure>`
                 )
@@ -872,7 +873,12 @@ function renderAdventureAlbumDetail(album) {
             </div>`
           : `<div class="empty-card"><p>No photos in this album yet.</p></div>`
       }
-      <button type="button" class="btn btn-ghost btn-full" id="btn-del-album" style="margin-top:1rem;color:var(--danger)">Delete whole adventure</button>
+      <div class="card album-danger-zone">
+        <p class="muted small">Want a clean slate for this outing?</p>
+        <button type="button" class="btn btn-ghost btn-full btn-delete-danger" id="btn-del-album">
+          🗑️ Delete whole adventure album
+        </button>
+      </div>
       ${renderAdventureCameraOverlay()}
     </section>
   `;
@@ -1562,6 +1568,10 @@ async function openFindDetail(id, { editTests = false } = {}) {
         <button class="btn btn-secondary" data-close type="button">Close</button>
         <button class="btn btn-primary" id="save-find" type="button">Save changes</button>
       </div>
+      <button type="button" class="btn btn-ghost btn-full btn-delete-danger" id="btn-delete-find">
+        🗑️ Delete this rock from my Dex
+      </button>
+      <p class="muted small center">Deletes this find only — you can always collect it again later.</p>
     </div>
   `);
 
@@ -1612,6 +1622,18 @@ async function openFindDetail(id, { editTests = false } = {}) {
     document.querySelector(".modal-backdrop")?.remove();
     toast("Updated!", "success");
     await evaluateBadges({ celebrate: true });
+    await render();
+  });
+
+  $("#btn-delete-find")?.addEventListener("click", async () => {
+    const label = f.nickname || f.name || "this rock";
+    const ok = window.confirm(
+      `Delete “${label}” from your Rock Dex?\n\nThis cannot be undone. (You can collect another one later!)`
+    );
+    if (!ok) return;
+    await deleteFind(id);
+    document.querySelector(".modal-backdrop")?.remove();
+    toast("Rock removed from your Dex", "info");
     await render();
   });
 }
@@ -1825,10 +1847,16 @@ function bindExplore() {
 
   $("#btn-del-album")?.addEventListener("click", async () => {
     if (!state.adventureAlbumId) return;
-    if (!window.confirm("Delete this whole adventure album?")) return;
+    const alb = await getAdventureAlbum(state.adventureAlbumId);
+    const title = alb?.title || "this adventure";
+    const n = alb?.photos?.length || 0;
+    const ok = window.confirm(
+      `Delete the whole album “${title}”?\n\nThis removes all ${n} photo${n === 1 ? "" : "s"} in it. This cannot be undone.`
+    );
+    if (!ok) return;
     await deleteAdventureAlbum(state.adventureAlbumId);
     state.adventureAlbumId = null;
-    toast("Adventure deleted", "info");
+    toast("Adventure album deleted", "info");
     await render();
   });
 
@@ -1854,12 +1882,26 @@ function bindExplore() {
 
   app.querySelectorAll("[data-del-adv]").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const ok = window.confirm(
+        "Delete this adventure photo?\n\nIt’s gone for good — you can always take a new one later."
+      );
+      if (!ok) return;
       await deleteAdventurePhoto(btn.dataset.delAdv);
-      toast("Photo removed", "info");
+      toast("Photo deleted", "info");
       // if album empty, go back to list
       if (state.adventureAlbumId) {
         const a = await getAdventureAlbum(state.adventureAlbumId);
-        if (!a || !(a.photos || []).length) state.adventureAlbumId = null;
+        if (!a || !(a.photos || []).length) {
+          // Empty album: offer to remove the empty shell
+          const clearEmpty = window.confirm(
+            "That was the last photo in this album.\n\nDelete the empty adventure album too?"
+          );
+          if (clearEmpty) {
+            await deleteAdventureAlbum(state.adventureAlbumId);
+            toast("Empty album deleted", "info");
+          }
+          state.adventureAlbumId = null;
+        }
       }
       await render();
     });

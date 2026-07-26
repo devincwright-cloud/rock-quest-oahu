@@ -812,6 +812,28 @@ h1, h2, h3 {
   text-align: left;
   padding: 0;
 }
+.btn-delete-danger {
+  margin-top: 1rem;
+  color: var(--danger) !important;
+  border: 1px dashed rgba(251, 113, 133, 0.45) !important;
+  font-weight: 800;
+}
+.btn-delete-danger:hover {
+  background: rgba(251, 113, 133, 0.12);
+}
+.btn-del-photo {
+  margin-top: 0.25rem;
+}
+.album-danger-zone {
+  margin-top: 1rem;
+  border-color: rgba(251, 113, 133, 0.28);
+}
+.album-danger-zone .btn-delete-danger {
+  margin-top: 0.35rem;
+}
+.find-detail .btn-delete-danger {
+  margin-top: 1.1rem;
+}
 
 /* Location photo challenges */
 .challenge-card {
