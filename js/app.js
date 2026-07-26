@@ -391,7 +391,7 @@ function renderNearChallengeCard(spot, { done = false, compact = false } = {}) {
       ${
         done
           ? `<p class="checkin-done">You snapped the highlight here — nice eyes! 🎉</p>`
-          : `<p class="muted small">+${XP_REWARDS.photoChallenge || 12} XP when you snap this specific highlight</p>
+          : `<p class="muted small">+${XP_REWARDS.photoChallenge || 12} XP — photo must show the real target (AI checks!)</p>
              <button type="button" class="btn btn-primary btn-full" data-challenge-snap="${escapeAttr(spot.id)}">
                📸 Snap the highlight!
              </button>`
